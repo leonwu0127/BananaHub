@@ -467,7 +467,27 @@ return function(parent, ctx)
         return nil
     end
 
+    local function hatchName(inst)
+        -- PreparedSourceName = "Workspace.NewEnchantedEggs.CelestialSunlion" -> "Celestial Sunlion"
+        local function fromPath(v)
+            if type(v) ~= "string" or v == "" then return nil end
+            local last = string.match(v, "([^%.]+)$") or v
+            last = string.gsub(last, "_", " ")
+            last = string.gsub(last, "(%l)(%u)", "%1 %2")
+            last = string.gsub(last, "(%a)(%d)", "%1 %2")
+            return last
+        end
+        local r = fromPath(inst:GetAttribute("PreparedSourceName"))
+        if r then return r end
+        for _, d in ipairs(inst:GetDescendants()) do
+            r = fromPath(d:GetAttribute("PreparedSourceName"))
+            if r then return r end
+        end
+        return nil
+    end
     local function findContents(inst)
+        local hn = hatchName(inst)
+        if hn then return hn end
         local _, guid = splitRenderName(inst.Name)
         local byGuid = findPetByGuid(guid)
         if byGuid then return byGuid end
@@ -634,7 +654,7 @@ return function(parent, ctx)
             local title = prettyKind(kind)
             local rid, rguid = splitRenderName(e.inst.Name)
             if rid then
-                title = "Egg " .. i
+                title = e.contents or ("Egg " .. i)
                 area = ""
             end
             for _, key in ipairs({ "EggName", "EggType", "DisplayName", "PetName" }) do
@@ -643,7 +663,7 @@ return function(parent, ctx)
             end
             if area ~= "" then title = title .. " (" .. area .. ")" end
             if e.rarity then title = title .. " [" .. e.rarity .. "]" end
-            if e.contents then title = title .. " -> " .. e.contents end
+            if e.contents and e.contents ~= title then title = title .. " -> " .. e.contents end
             name.Text = title
             name.TextColor3 = TEXT
             name.Font = Enum.Font.GothamMedium
@@ -897,6 +917,12 @@ return function(parent, ctx)
         local lines = { "BananaHub DEEP debug v4 - GameId " .. tostring(game.GameId) }
         local spots = nestSpots()
         lines[#lines + 1] = "Nest spots: " .. #spots
+        for i, egg in ipairs(lastEggs) do
+            if i > 3 then break end
+            local at = {}
+            for k, v in pairs(egg:GetAttributes()) do at[#at + 1] = k .. "=" .. tostring(v) end
+            lines[#lines + 1] = "EGG" .. i .. " " .. egg:GetFullName() .. " | " .. table.concat(at, ", ")
+        end
         -- What is standing near the nests? (any model, any folder)
         local near, shownNear = {}, 0
         if #spots > 0 then

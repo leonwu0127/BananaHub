@@ -194,13 +194,109 @@ return function(parent, ctx)
         return inst:IsA("Model") and hasPrompt(inst)
     end
 
+    local nestOfEgg
     local function areaOf(inst)
+        if nestOfEgg and nestOfEgg[inst] then return nestOfEgg[inst] end
         local a = inst
         while a and a.Parent do
             if a.Parent.Name == "GuardAreas" then return a.Name end
             a = a.Parent
         end
         return nil
+    end
+
+    -- Nest eggs are not children of the nest: the game renders them elsewhere and
+    -- places them on the nest. So find every nest's EggFitBounds / EggSpotBottom box
+    -- and treat egg models standing inside one as that nest's egg.
+    local function nestSpots()
+        local spots = {}
+        local ga = guardAreas()
+        if not ga then return spots end
+        for _, area in ipairs(ga:GetChildren()) do
+            for _, d in ipairs(area:GetDescendants()) do
+                if d:IsA("BasePart") and (d.Name == "EggFitBounds" or d.Name == "EggSpotBottom") then
+                    local nest = d.Parent
+                    if not spots[nest] or d.Name == "EggFitBounds" then
+                        spots[nest] = { part = d, area = area.Name }
+                    end
+                end
+            end
+        end
+        local out = {}
+        for nest, sp in pairs(spots) do sp.nest = nest; out[#out + 1] = sp end
+        return out
+    end
+
+    local function spotAt(spots, pos)
+        for _, sp in ipairs(spots) do
+            local rel = sp.part.CFrame:PointToObjectSpace(pos)
+            local half = sp.part.Size / 2
+            if math.abs(rel.X) <= half.X + 2 and math.abs(rel.Z) <= half.Z + 2
+                and rel.Y >= -half.Y - 2 and rel.Y <= half.Y + 10 then
+                return sp
+            end
+        end
+        return nil
+    end
+
+    local SKIP_TOP = { World = true, Plots = true, PlacedEggRenders = true, ClientRenderedAssets = true,
+        Terrain = true, Camera = true, ClientMountedPets = true }
+    nestOfEgg = {} -- [egg] = area name
+
+    local function positionOf(inst)
+        if inst:IsA("BasePart") then return inst.Position end
+        local ok, cf = pcall(function() return inst:GetPivot() end)
+        return ok and cf and cf.Position or nil
+    end
+
+    local function looksLikeEggModel(inst)
+        if not inst:IsA("Model") then return false end
+        if isPlayerStuff(inst) or Players:GetPlayerFromCharacter(inst) then return false end
+        if hasEggInName(inst) or matchesEggPattern(inst) or hasPrompt(inst) then return true end
+        if inst:FindFirstChild("Hitbox") then return true end
+        local attr = inst:GetAttribute("PreparedSourceName")
+        return attr ~= nil and string.find(string.lower(tostring(attr)), "egg", 1, true) ~= nil
+    end
+
+    local function findEggsByPosition()
+        local found = {}
+        local spots = nestSpots()
+        if #spots == 0 then return found, 0 end
+        local seen = {}
+        local function scan(container)
+            for _, d in ipairs(container:GetDescendants()) do
+                if not seen[d] and looksLikeEggModel(d) and not inPen(d) then
+                    local pos = positionOf(d)
+                    local sp = pos and spotAt(spots, pos)
+                    if sp then
+                        seen[d] = true
+                        for _, dd in ipairs(d:GetDescendants()) do seen[dd] = true end
+                        nestOfEgg[d] = sp.area
+                        found[#found + 1] = d
+                    end
+                end
+            end
+        end
+        for _, top in ipairs(workspace:GetChildren()) do
+            if not SKIP_TOP[top.Name] and not Players:GetPlayerFromCharacter(top) then
+                if looksLikeEggModel(top) then
+                    local pos = positionOf(top)
+                    local sp = pos and spotAt(spots, pos)
+                    if sp then nestOfEgg[top] = sp.area; found[#found + 1] = top; seen[top] = true end
+                end
+                if not seen[top] then scan(top) end
+            end
+        end
+        -- also models parented inside the GuardAreas but outside the nest meshes
+        local ga = guardAreas()
+        if ga then
+            for _, area in ipairs(ga:GetChildren()) do
+                for _, c in ipairs(area:GetChildren()) do
+                    if c.Name ~= "Nests" then scan(c) end
+                end
+            end
+        end
+        return found, #spots
     end
 
     local function findEggs()
@@ -225,6 +321,10 @@ return function(parent, ctx)
         local loose = workspace:FindFirstChild("Eggs")
         if loose then
             for _, c in ipairs(loose:GetChildren()) do consider(c) end
+        end
+
+        for _, e in ipairs((findEggsByPosition())) do
+            if not set[e] then candidates[#candidates + 1] = e; set[e] = true end
         end
 
         -- Keep only the top-most match so a model and its parts aren't listed separately.
@@ -772,7 +872,52 @@ return function(parent, ctx)
     end
 
     local function deepDebug()
-        local lines = { "BananaHub DEEP debug v3 - GameId " .. tostring(game.GameId) }
+        local lines = { "BananaHub DEEP debug v4 - GameId " .. tostring(game.GameId) }
+        local spots = nestSpots()
+        lines[#lines + 1] = "Nest spots: " .. #spots
+        -- What is standing near the nests? (any model, any folder)
+        local near, shownNear = {}, 0
+        if #spots > 0 then
+            for _, d in ipairs(workspace:GetDescendants()) do
+                if shownNear >= 12 then break end
+                if d:IsA("Model") and not d:IsDescendantOf(spots[1].part.Parent.Parent) then
+                    local inNest = false
+                    local a = d
+                    while a do if a.Name == "NestModel" then inNest = true break end a = a.Parent end
+                    if not inNest and not Players:GetPlayerFromCharacter(d) then
+                        local pos = positionOf(d)
+                        local sp = pos and spotAt(spots, pos)
+                        if sp and not near[d.Parent] then
+                            near[d.Parent] = true
+                            shownNear += 1
+                            lines[#lines + 1] = "  NEAR " .. sp.area .. ": " .. d:GetFullName() .. " (" .. #d:GetChildren() .. " ch)"
+                        end
+                    end
+                end
+            end
+        end
+        if shownNear == 0 then lines[#lines + 1] = "  nothing found standing in any nest" end
+        local slots = workspace:FindFirstChild("AreaEggSlotsClient", true)
+        lines[#lines + 1] = "== AreaEggSlotsClient " .. (slots and slots:GetFullName() or "MISSING")
+        if slots then
+            describe(slots, lines, 2)
+            for i, c in ipairs(slots:GetChildren()) do
+                if i > 3 then break end
+                describe(c, lines, 4)
+                for j, cc in ipairs(c:GetChildren()) do
+                    if j > 3 then break end
+                    describe(cc, lines, 6)
+                end
+            end
+        end
+        local sp1 = spots[1]
+        if sp1 then
+            lines[#lines + 1] = "  spot1 " .. sp1.area .. " " .. sp1.part.Name .. " pos " .. tostring(sp1.part.Position) .. " size " .. tostring(sp1.part.Size)
+            lines[#lines + 1] = "  nest attrs:"
+            for k, v in pairs(sp1.nest:GetAttributes()) do lines[#lines + 1] = "    " .. k .. "=" .. tostring(v) end
+            local nests = sp1.nest.Parent
+            for k, v in pairs(nests:GetAttributes()) do lines[#lines + 1] = "    Nests." .. k .. "=" .. tostring(v) end
+        end
         lines[#lines + 1] = "Stealable found: " .. #lastEggs
         for i, e in ipairs(lastEggs) do
             if i > 5 then break end
@@ -782,10 +927,10 @@ return function(parent, ctx)
         lines[#lines + 1] = "== GuardAreas " .. (ga and ("(" .. #ga:GetChildren() .. " areas)") or "MISSING")
         if ga then
             for ai, area in ipairs(ga:GetChildren()) do
-                if ai > 2 then break end
+                if ai > 13 then break end
                 local nests = area:FindFirstChild("Nests", true)
                 lines[#lines + 1] = " AREA " .. area.Name .. " nests=" .. tostring(nests and #nests:GetChildren())
-                if nests then
+                if nests and false then
                     for ni, nest in ipairs(nests:GetChildren()) do
                         if ni > 2 then break end
                         describe(nest, lines, 2)

@@ -49,12 +49,15 @@ return function(parent, ctx)
     local espButton = makeButton("ESP: On", 64, 70)
     local debugButton = makeButton("Debug", 54, 140)
     local deepButton = makeButton("Deep", 48, 200)
-    local sortButton = makeButton("Sort: Near", 78, 254)
-    local SORT_MODES = { "Near", "Far", "Name", "Area" }
+    local sortButton = makeButton("Sort: Near", 96, 254)
+    local SORT_MODES = { "Near", "Far", "Most $/s", "Most Rare" }
     local sortMode = 1
+    local selectedEgg = nil
+    local stealing = false
+    local autoReturn = true -- teleport back to where you were after stealing
 
     local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -338, 0, 24)
+    status.Size = UDim2.new(1, -356, 0, 24)
     status.BackgroundTransparency = 1
     status.Text = "Scanning..."
     status.TextColor3 = TEXT
@@ -493,6 +496,192 @@ return function(parent, ctx)
         return nil
     end
 
+    ----------------------------------------------------------------
+    -- Remote logger: listens to the game's RemoteEvents (read-only) so we can
+    -- see which one sends egg names, and learn guid -> name pairs from them.
+    ----------------------------------------------------------------
+    local remoteLog = {}      -- recent payloads (strings)
+    local remoteNames = {}    -- [lower guid] = name seen next to it in a payload
+    local remoteConns = {}
+    local GUID_PAT = "^%x%x%x%x%x%x%x%x%-?%x%x%x%x%-?%x%x%x%x%-?%x%x%x%x%-?%x%x%x%x%x%x%x%x%x%x%x%x$"
+    local function isGuid(v)
+        return type(v) == "string" and (string.match(v, GUID_PAT) ~= nil or (#v >= 24 and string.match(v, "^%x+$") ~= nil))
+    end
+    local function ser(v, depth, budget)
+        depth = depth or 0
+        local t = typeof(v)
+        if t == "string" then return '"' .. string.sub(v, 1, 40) .. '"' end
+        if t == "Instance" then return v.Name end
+        if t ~= "table" then return tostring(v) end
+        if depth > 2 then return "{...}" end
+        local parts, n = {}, 0
+        for k, x in pairs(v) do
+            n += 1
+            if n > 8 then parts[#parts + 1] = "..." break end
+            parts[#parts + 1] = tostring(k) .. "=" .. ser(x, depth + 1)
+        end
+        return "{" .. table.concat(parts, ", ") .. "}"
+    end
+    local function learnNames(v, depth)
+        if type(v) ~= "table" or depth > 4 then return end
+        local guid, name
+        for k, x in pairs(v) do
+            if isGuid(x) then guid = x end
+            if type(k) == "string" and isGuid(k) and type(x) == "table" then learnNames(x, depth + 1)
+                for _, y in pairs(x) do
+                    if type(y) == "string" and not isGuid(y) and string.match(y, "%a%a%a") and #y < 40 then
+                        remoteNames[string.lower(k)] = remoteNames[string.lower(k)] or y
+                        break
+                    end
+                end
+            end
+            if type(x) == "string" and not isGuid(x) and string.match(x, "^%u%a+") and #x < 40 then
+                local lk = type(k) == "string" and string.lower(k) or ""
+                if lk == "" or string.find(lk, "name", 1, true) or string.find(lk, "pet", 1, true)
+                    or string.find(lk, "egg", 1, true) or string.find(lk, "type", 1, true) then
+                    name = name or x
+                end
+            end
+            if type(x) == "table" then learnNames(x, depth + 1) end
+        end
+        if guid and name then remoteNames[string.lower((string.gsub(guid, "%-", "")))] = name end
+    end
+    local function hookRemote(r)
+        local ok, conn = pcall(function()
+            return r.OnClientEvent:Connect(function(...)
+                local args = table.pack(...)
+                pcall(function()
+                    local strs = {}
+                    for i = 1, math.min(args.n, 4) do strs[#strs + 1] = ser(args[i]) end
+                    local line = r.Name .. "(" .. table.concat(strs, ", ") .. ")"
+                    remoteLog[#remoteLog + 1] = string.sub(line, 1, 220)
+                    if #remoteLog > 80 then table.remove(remoteLog, 1) end
+                    for i = 1, args.n do learnNames(args[i], 0) end
+                    if args.n >= 2 and isGuid(args[1]) and type(args[2]) == "string" then
+                        remoteNames[string.lower((string.gsub(args[1], "%-", "")))] = args[2]
+                    end
+                end)
+            end)
+        end)
+        if ok and conn then remoteConns[#remoteConns + 1] = conn end
+    end
+    pcall(function()
+        for _, d in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+            if d:IsA("RemoteEvent") or d:IsA("UnreliableRemoteEvent") then hookRemote(d) end
+        end
+    end)
+
+    ----------------------------------------------------------------
+    -- Proximity prompts (for naming unknown eggs and for stealing)
+    ----------------------------------------------------------------
+    local promptCache, promptCacheAt = {}, 0
+    local function promptPos(pp)
+        local p = pp.Parent
+        if not p then return nil end
+        if p:IsA("BasePart") then return p.Position end
+        if p:IsA("Attachment") then return p.WorldPosition end
+        return positionOf(p)
+    end
+    local function allPrompts()
+        if os.clock() - promptCacheAt < 10 then return promptCache end
+        promptCacheAt = os.clock()
+        promptCache = {}
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("ProximityPrompt") and not inPen(d) then promptCache[#promptCache + 1] = d end
+        end
+        return promptCache
+    end
+    local function promptFor(inst, radius)
+        local own = inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if own then return own end
+        local pos = positionOf(inst)
+        if not pos then return nil end
+        local best, bestD = nil, radius or 14
+        for _, pp in ipairs(allPrompts()) do
+            if pp.Parent then
+                local pp_pos = promptPos(pp)
+                local d = pp_pos and (pp_pos - pos).Magnitude
+                if d and d < bestD then best, bestD = pp, d end
+            end
+        end
+        return best
+    end
+    local PROMPT_WORDS = { steal = true, take = true, grab = true, pick = true, ["pick up"] = true, hatch = true, egg = true, [""] = true }
+    local function promptName(inst)
+        local pp = promptFor(inst, 10)
+        if not pp then return nil end
+        for _, t in ipairs({ pp.ObjectText, pp.ActionText }) do
+            if type(t) == "string" and not PROMPT_WORDS[string.lower(t)] and string.match(t, "%a%a") then
+                return t
+            end
+        end
+        return nil
+    end
+
+    ----------------------------------------------------------------
+    -- $/s and rarity, read from whatever the egg exposes
+    ----------------------------------------------------------------
+    local SUFFIX = { k = 1e3, m = 1e6, b = 1e9, t = 1e12, qa = 1e15, qd = 1e15, qi = 1e18 }
+    local function parseNum(numStr, suf)
+        local n = tonumber((string.gsub(numStr or "", ",", "")))
+        if not n then return nil end
+        return n * (SUFFIX[string.lower(suf or "")] or 1)
+    end
+    local function perSecFromText(t)
+        if type(t) ~= "string" then return nil end
+        local num, suf = string.match(t, "([%d%.,]+)%s*(%a?%a?)%s*/%s*s")
+        if not num then num, suf = string.match(t, "([%d%.,]+)%s*(%a?%a?)%s*per%s*sec") end
+        return num and parseNum(num, suf)
+    end
+    local RARITY_RANK = { common = 1, uncommon = 2, rare = 3, epic = 4, legendary = 5, mythic = 6, mythical = 6,
+        secret = 7, divine = 8, celestial = 8, cosmic = 8, exclusive = 9, godly = 9, og = 10, limited = 9 }
+    local function rarityFromText(t)
+        if type(t) ~= "string" then return nil end
+        local low = string.lower(t)
+        local big = string.match(low, "1%s*in%s*([%d%.,]+%a?)")
+        if big then
+            local num, suf = string.match(big, "([%d%.,]+)(%a?)")
+            local n = parseNum(num, suf)
+            if n and n > 0 then return 100 + math.log10(n) * 10 end
+        end
+        local pct = string.match(low, "([%d%.]+)%s*%%")
+        if pct and tonumber(pct) and tonumber(pct) > 0 then return 100 + math.log10(100 / tonumber(pct)) * 10 end
+        local best
+        for word, rank in pairs(RARITY_RANK) do
+            if string.find(low, word, 1, true) and (not best or rank > best) then best = rank end
+        end
+        return best
+    end
+    local function eggStats(inst, contents, rarity)
+        local ps, rr = perSecFromText(contents), rarityFromText(rarity) or rarityFromText(contents)
+        local function look(obj)
+            for k, v in pairs(obj:GetAttributes()) do
+                local lk = string.lower(k)
+                if not ps and (string.find(lk, "persec", 1, true) or string.find(lk, "income", 1, true)
+                    or string.find(lk, "cash", 1, true) or string.find(lk, "money", 1, true) or lk == "rate") then
+                    ps = tonumber(v) or perSecFromText(tostring(v)) or ps
+                end
+                if not rr and (string.find(lk, "odds", 1, true) or string.find(lk, "chance", 1, true)
+                    or string.find(lk, "rarity", 1, true) or string.find(lk, "tier", 1, true)) then
+                    rr = rarityFromText(tostring(v)) or rr
+                end
+            end
+        end
+        look(inst)
+        local n = 0
+        for _, d in ipairs(inst:GetDescendants()) do
+            if ps and rr then break end
+            n += 1
+            if n > 120 then break end
+            look(d)
+            if d:IsA("TextLabel") and d.Text ~= "" then
+                ps = ps or perSecFromText(d.Text)
+                rr = rr or rarityFromText(d.Text)
+            end
+        end
+        return ps, rr
+    end
+
     local meshName
     -- names Blender / the importer gives parts: Cube.003, Plane.002, untitled.054, Meshes/..._0011.004
     local JUNK = { hitbox = true, hitboxweld = true, part = true, model = true, meshpart = true, root = true,
@@ -585,6 +774,10 @@ return function(parent, ctx)
     local function findContents(inst)
         local hn = hatchName(inst)
         if hn then return hn end
+        local rn = remoteNames[string.lower((string.gsub(inst.Name, "%-", "")))]
+        if rn then return rn end
+        local pn = promptName(inst)
+        if pn then return pn end
         local _, guid = splitRenderName(inst.Name)
         local byGuid = findPetByGuid(guid)
         if byGuid then return byGuid end
@@ -647,6 +840,10 @@ return function(parent, ctx)
             end)
             for _, egg in ipairs(sorted) do
                 keep[egg] = true
+                local hh = highlights[egg]
+                if hh and hh:IsA("Highlight") then
+                    hh.FillColor = (egg == selectedEgg) and Color3.fromRGB(255, 70, 70) or GOLD
+                end
                 count += 1
                 local wantBox = count > MAX_HIGHLIGHTS
                 local h = highlights[egg]
@@ -671,7 +868,7 @@ return function(parent, ctx)
                     local h = Instance.new("Highlight")
                     h.Name = "BananaHubEgg"
                     h.Adornee = egg
-                    h.FillColor = GOLD
+                    h.FillColor = (egg == selectedEgg) and Color3.fromRGB(255, 70, 70) or GOLD
                     h.FillTransparency = 0.6
                     h.OutlineColor = Color3.fromRGB(255, 255, 255)
                     h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -694,6 +891,7 @@ return function(parent, ctx)
     -- Rendering
     ----------------------------------------------------------------
     local lastEggs = {}
+    local stealEgg -- defined below
 
     local function render(eggs)
         local savedScroll = list.CanvasPosition
@@ -712,16 +910,23 @@ return function(parent, ctx)
             }
         end
         for _, e in ipairs(entries) do
-            local _, _, ar = parseName(e.inst.Name)
-            e.sortName = string.lower(e.contents or "zzz")
-            e.sortArea = string.lower(nestOfEgg[e.inst] or ar or "zzz")
+            local ok, ps, rr = pcall(eggStats, e.inst, e.contents, e.rarity)
+            if ok then e.perSec, e.rank = ps, rr end
         end
         local mode = SORT_MODES[sortMode]
         table.sort(entries, function(a, b)
             local da, db = a.dist or math.huge, b.dist or math.huge
-            if mode == "Far" then return da > db end
-            if mode == "Name" and a.sortName ~= b.sortName then return a.sortName < b.sortName end
-            if mode == "Area" and a.sortArea ~= b.sortArea then return a.sortArea < b.sortArea end
+            if mode == "Far" then
+                if da == math.huge or db == math.huge then return da < db end
+                return da > db
+            end
+            if mode == "Most $/s" then
+                local pa, pb = a.perSec or -1, b.perSec or -1   -- unknown goes last
+                if pa ~= pb then return pa > pb end
+            elseif mode == "Most Rare" then
+                local ra, rb = a.rank or -1, b.rank or -1
+                if ra ~= rb then return ra > rb end
+            end
             return da < db
         end)
 
@@ -742,16 +947,48 @@ return function(parent, ctx)
         status.Text = ("Stealable eggs: %d"):format(#entries)
 
         for i, e in ipairs(entries) do
-            local row = Instance.new("Frame")
+            local row = Instance.new("TextButton")
             row.LayoutOrder = i
             row.Size = UDim2.new(1, -6, 0, 30)
             row.BackgroundColor3 = ROW
             row.BorderSizePixel = 0
+            row.AutoButtonColor = false
+            row.Text = ""
             row.Parent = list
 
             local c = Instance.new("UICorner")
             c.CornerRadius = UDim.new(0, 6)
             c.Parent = row
+
+            if e.inst == selectedEgg then
+                local stroke = Instance.new("UIStroke")
+                stroke.Color = GOLD
+                stroke.Thickness = 2
+                stroke.Parent = row
+            end
+            row.Activated:Connect(function()
+                selectedEgg = (selectedEgg ~= e.inst) and e.inst or nil
+                syncHighlights(lastEggs)
+                render(lastEggs)
+            end)
+
+            local stealBtn = Instance.new("TextButton")
+            stealBtn.AnchorPoint = Vector2.new(1, 0.5)
+            stealBtn.Position = UDim2.new(1, -4, 0.5, 0)
+            stealBtn.Size = UDim2.new(0, 50, 0, 22)
+            stealBtn.BackgroundColor3 = GOLD
+            stealBtn.Text = "Steal"
+            stealBtn.TextColor3 = Color3.fromRGB(30, 30, 30)
+            stealBtn.Font = Enum.Font.GothamBold
+            stealBtn.TextSize = 12
+            stealBtn.Parent = row
+            local sc = Instance.new("UICorner")
+            sc.CornerRadius = UDim.new(0, 5)
+            sc.Parent = stealBtn
+            stealBtn.Activated:Connect(function()
+                selectedEgg = e.inst
+                if stealEgg then task.spawn(stealEgg, e.inst) end
+            end)
 
             local name = Instance.new("TextLabel")
             name.Position = UDim2.new(0, 8, 0, 0)
@@ -772,6 +1009,7 @@ return function(parent, ctx)
             if e.rarity then title = title .. " [" .. e.rarity .. "]" end
             if e.contents and e.contents ~= title then title = title .. " -> " .. e.contents end
             name.Text = title
+            name.Size = UDim2.new(0.55, -8, 1, 0)
             name.TextColor3 = TEXT
             name.Font = Enum.Font.GothamMedium
             name.TextSize = 12
@@ -781,15 +1019,17 @@ return function(parent, ctx)
 
             local info = Instance.new("TextLabel")
             info.AnchorPoint = Vector2.new(1, 0)
-            info.Position = UDim2.new(1, -8, 0, 0)
-            info.Size = UDim2.new(0.5, -8, 1, 0)
+            info.Position = UDim2.new(1, -60, 0, 0)
+            info.Size = UDim2.new(0.45, -64, 1, 0)
             info.BackgroundTransparency = 1
             local owner = e.owner
             if owner == player.Name then owner = "You" end
             local nestArea = areaOf(e.inst)
             if nestArea then owner = "Nest: " .. nestArea end
             local dist = e.dist and (math.floor(e.dist) .. " studs") or "? studs"
-            info.Text = (owner or "Unknown owner") .. "  |  " .. dist
+            local extras = ""
+            if e.perSec then extras = extras .. "$" .. tostring(math.floor(e.perSec)) .. "/s  |  " end
+            info.Text = extras .. (owner or "Unknown owner") .. "  |  " .. dist
             info.TextColor3 = MUTED
             info.Font = Enum.Font.Gotham
             info.TextSize = 11
@@ -815,8 +1055,65 @@ return function(parent, ctx)
             return
         end
         lastEggs = eggs
+        if selectedEgg and not selectedEgg.Parent then selectedEgg = nil end
         syncHighlights(eggs)
         render(eggs)
+    end
+
+    ----------------------------------------------------------------
+    -- Steal: teleport to the egg, trigger its prompt, teleport back
+    ----------------------------------------------------------------
+    local function firePrompt(pp)
+        pcall(function() pp.RequiresLineOfSight = false end)
+        if fireproximityprompt then
+            local ok = pcall(fireproximityprompt, pp)
+            if ok then return true, "fireproximityprompt" end
+            ok = pcall(fireproximityprompt, pp, 1)
+            if ok then return true, "fireproximityprompt" end
+        end
+        local hold = pp.HoldDuration
+        pcall(function() pp.HoldDuration = 0 end)
+        local ok = pcall(function()
+            pp:InputHoldBegin()
+            task.wait(math.max(hold, 0) + 0.1)
+            pp:InputHoldEnd()
+        end)
+        return ok, "InputHoldBegin"
+    end
+
+    stealEgg = function(egg)
+        if stealing then return end
+        stealing = true
+        local ok, err = pcall(function()
+            local char = player.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if not hrp then status.Text = "No character" return end
+            if not egg or not egg.Parent then status.Text = "That egg is gone" return end
+            local pos = positionOf(egg)
+            if not pos then status.Text = "Can't find egg position" return end
+            local home = hrp.CFrame
+            status.Text = "Teleporting..."
+            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
+            task.wait(0.35)
+            promptCacheAt = 0 -- rescan prompts near the egg
+            local pp = promptFor(egg, 16)
+            if not pp then
+                status.Text = "No steal prompt found at this egg (press Deep)"
+                return
+            end
+            local pp_pos = promptPos(pp)
+            if pp_pos then hrp.CFrame = CFrame.new(pp_pos + Vector3.new(0, 2, 0)) task.wait(0.2) end
+            local fired, how = firePrompt(pp)
+            status.Text = fired and ("Steal sent (" .. how .. ")") or "Prompt failed"
+            task.wait(0.6)
+            if autoReturn then
+                local h2 = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                if h2 then h2.CFrame = home end
+            end
+        end)
+        stealing = false
+        if not ok then status.Text = "Steal error: " .. tostring(err) end
+        task.delay(1, function() if alive then refresh() end end)
     end
 
     ----------------------------------------------------------------
@@ -1027,7 +1324,38 @@ return function(parent, ctx)
     end
 
     local function deepDebug()
-        local lines = { "BananaHub DEEP debug v6 - GameId " .. tostring(game.GameId) }
+        local lines = { "BananaHub DEEP debug v7 - GameId " .. tostring(game.GameId) }
+        -- names learned from remotes + prompts at the first unknown eggs
+        local learned = 0
+        for _ in pairs(remoteNames) do learned += 1 end
+        lines[#lines + 1] = "Remotes hooked: " .. #remoteConns .. " | guid names learned: " .. learned
+        promptCacheAt = 0
+        local shownP = 0
+        for _, egg in ipairs(lastEggs) do
+            if shownP >= 6 then break end
+            if not hatchName(egg) then
+                shownP += 1
+                local pp = promptFor(egg, 16)
+                if pp then
+                    local pp_pos = promptPos(pp)
+                    local d = pp_pos and positionOf(egg) and math.floor((pp_pos - positionOf(egg)).Magnitude) or "?"
+                    local at = {}
+                    for k, v in pairs(pp:GetAttributes()) do at[#at + 1] = k .. "=" .. tostring(v) end
+                    lines[#lines + 1] = "PROMPT " .. egg.Name:sub(1, 8) .. " obj='" .. pp.ObjectText .. "' act='" .. pp.ActionText
+                        .. "' hold=" .. pp.HoldDuration .. " d=" .. tostring(d) .. " at " .. pp:GetFullName() .. " " .. table.concat(at, ",")
+                else
+                    lines[#lines + 1] = "PROMPT " .. egg.Name:sub(1, 8) .. " none within 16 studs"
+                end
+            end
+        end
+        lines[#lines + 1] = "== Last remote events (newest last, max 25)"
+        for i = math.max(1, #remoteLog - 24), #remoteLog do lines[#lines + 1] = "  " .. remoteLog[i] end
+        if #remoteLog == 0 then lines[#lines + 1] = "  (none yet - walk around / wait for eggs to spawn, then press Deep again)" end
+        local remotes = {}
+        for _, d in ipairs(game:GetService("ReplicatedStorage"):GetDescendants()) do
+            if (d:IsA("RemoteEvent") or d:IsA("RemoteFunction")) and #remotes < 40 then remotes[#remotes + 1] = d.Name end
+        end
+        lines[#lines + 1] = "== Remotes: " .. table.concat(remotes, ", ")
         local spots = nestSpots()
         lines[#lines + 1] = "Nest spots: " .. #spots
         for i, egg in ipairs(lastEggs) do
@@ -1197,7 +1525,7 @@ return function(parent, ctx)
                 lines[#lines + 1] = "  " .. d:GetFullName():gsub("^ReplicatedStorage%.", "") .. " (" .. d.ClassName .. ")"
             end
         end
-        showOutput("Deep v3", table.concat(lines, "\n"))
+        showOutput("Deep v7", table.concat(lines, "\n"))
     end
 
     connect(deepButton, deepDebug)
@@ -1215,6 +1543,7 @@ return function(parent, ctx)
     return {
         Destroy = function()
             alive = false
+            for _, cn in ipairs(remoteConns) do pcall(function() cn:Disconnect() end) end
             for inst in pairs(highlights) do
                 clearHighlight(inst)
             end

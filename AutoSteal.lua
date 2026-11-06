@@ -109,8 +109,32 @@ return function(parent, ctx)
         return false
     end
 
+    -- Decoration / machine / nest containers whose "egg" parts are never real eggs.
+    local BAD_ANCESTORS = { "machines", "areaeggslotsclient", "__clienttreadmillrenders", "treadmills" }
+    local function inBadPlace(inst)
+        local a = inst
+        while a and a ~= workspace do
+            local n = string.lower(a.Name)
+            for _, b in ipairs(BAD_ANCESTORS) do
+                if n == b then return true end
+            end
+            a = a.Parent
+        end
+        return false
+    end
+
+    -- Real eggs are named like "FirstAreaEgg_5500179517_5979771_Forest".
+    local function matchesEggPattern(inst)
+        local n = inst.Name
+        if string.find(n, "Meshes/", 1, true) or string.find(string.lower(n), "steal an egg", 1, true) then
+            return false
+        end
+        return string.match(n, "^%a*Egg_%d+") ~= nil
+    end
+
     local function isEggLike(inst)
-        return (inst:IsA("Model") or inst:IsA("BasePart")) and hasEggInName(inst) and not isJunk(inst)
+        return (inst:IsA("Model") or inst:IsA("BasePart"))
+            and matchesEggPattern(inst) and not isJunk(inst) and not inBadPlace(inst)
     end
 
     -- "FirstAreaEgg_5500179517_5979771_Forest" -> kind "FirstAreaEgg", numbers {...}, area "Forest"
@@ -139,9 +163,10 @@ return function(parent, ctx)
             if isEggLike(inst) and not inst:IsA("Terrain") and not isPlayerStuff(inst) then
                 candidates[#candidates + 1] = inst
                 set[inst] = true
-            elseif isEggContainer(inst) and not isPlayerStuff(inst) then
+            elseif isEggContainer(inst) and not inBadPlace(inst) and not isPlayerStuff(inst) then
                 for _, child in ipairs(inst:GetChildren()) do
-                    if (child:IsA("Model") or child:IsA("BasePart")) and not set[child] then
+                    if (child:IsA("Model") or child:IsA("BasePart")) and not set[child]
+                        and not isJunk(child) and not string.find(child.Name, "Meshes/", 1, true) then
                         candidates[#candidates + 1] = child
                         set[child] = true
                     end
@@ -422,6 +447,27 @@ return function(parent, ctx)
                 lines[#lines + 1] = "    children " .. table.concat(names, ", ")
             end
         end
+        -- Compact map of every "egg" name in the world, grouped by parent path (counts only).
+        local groups, order = {}, {}
+        local looseSamples = {}
+        for _, inst in ipairs(workspace:GetDescendants()) do
+            if string.find(string.lower(inst.Name), "egg", 1, true) then
+                local key = inst.Parent and inst.Parent:GetFullName() or "?"
+                key = string.gsub(key, "%d+", "#")
+                if not groups[key] then groups[key] = 0; order[#order + 1] = key end
+                groups[key] = groups[key] + 1
+                if string.match(inst.Name, "Egg_%d") and #looseSamples < 15 then
+                    looseSamples[#looseSamples + 1] = inst:GetFullName() .. " (" .. inst.ClassName .. ")"
+                end
+            end
+        end
+        lines[#lines + 1] = "Egg-name groups by parent (count):"
+        table.sort(order, function(a, b) return groups[a] > groups[b] end)
+        for i = 1, math.min(#order, 25) do
+            lines[#lines + 1] = "  " .. groups[order[i]] .. "  " .. order[i]
+        end
+        lines[#lines + 1] = "Names containing Egg_<digits> (first 15):"
+        for _, l in ipairs(looseSamples) do lines[#lines + 1] = "  " .. l end
         lines[#lines + 1] = "Players: " .. #Players:GetPlayers()
         for _, p in ipairs(Players:GetPlayers()) do
             lines[#lines + 1] = "  " .. p.Name .. " userId " .. p.UserId

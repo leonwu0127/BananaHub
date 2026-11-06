@@ -156,23 +156,75 @@ return function(parent, ctx)
         return spaced
     end
 
-    local function findEggs()
-        local candidates = {}
-        local set = {}
+    -- Stealable eggs live in the guarded nests: Workspace.World.Areas.GuardAreas.<Area>.Nests
+    -- Pen eggs (PlacedEggRenders / Plots) belong to players and are NOT listed.
+    local function guardAreas()
+        local world = workspace:FindFirstChild("World")
+        local areas = world and world:FindFirstChild("Areas")
+        return areas and areas:FindFirstChild("GuardAreas")
+    end
 
-        for _, inst in ipairs(workspace:GetDescendants()) do
-            if isEggLike(inst) and not inst:IsA("Terrain") and not isPlayerStuff(inst) then
+    local function inPen(inst)
+        local per = workspace:FindFirstChild("PlacedEggRenders")
+        local plots = workspace:FindFirstChild("Plots")
+        return (per and inst:IsDescendantOf(per)) or (plots and inst:IsDescendantOf(plots)) or false
+    end
+
+    local function hasPrompt(inst)
+        if inst:IsA("BasePart") and inst:FindFirstChildOfClass("ProximityPrompt") then return true end
+        return inst:FindFirstChildWhichIsA("ProximityPrompt", true) ~= nil
+    end
+
+    -- Nest helper parts (bounds, spots, points) are not eggs.
+    local NEST_JUNK = { "fitbounds", "spotbottom", "eggpoint", "eggspot", "bounds", "spawn", "nestmodel", "nests", "hitbox" }
+    local function isNestJunk(inst)
+        local n = string.lower(inst.Name)
+        for _, j in ipairs(NEST_JUNK) do
+            if n == j or string.find(n, j, 1, true) == 1 then return true end
+        end
+        return false
+    end
+
+    local function isNestEgg(inst)
+        if not (inst:IsA("Model") or inst:IsA("BasePart")) then return false end
+        if isNestJunk(inst) or inPen(inst) or isPlayerStuff(inst) then return false end
+        if matchesEggPattern(inst) then return true end
+        if hasEggInName(inst) and not isJunk(inst) then return true end
+        -- An unnamed model sitting in a nest with a steal prompt.
+        return inst:IsA("Model") and hasPrompt(inst)
+    end
+
+    local function areaOf(inst)
+        local a = inst
+        while a and a.Parent do
+            if a.Parent.Name == "GuardAreas" then return a.Name end
+            a = a.Parent
+        end
+        return nil
+    end
+
+    local function findEggs()
+        local candidates, set = {}, {}
+        local function consider(inst)
+            if not set[inst] and isNestEgg(inst) then
                 candidates[#candidates + 1] = inst
                 set[inst] = true
-            elseif isEggContainer(inst) and not inBadPlace(inst) and not isPlayerStuff(inst) then
-                for _, child in ipairs(inst:GetChildren()) do
-                    if (child:IsA("Model") or child:IsA("BasePart")) and not set[child]
-                        and not isJunk(child) and not string.find(child.Name, "Meshes/", 1, true) then
-                        candidates[#candidates + 1] = child
-                        set[child] = true
+            end
+        end
+        local ga = guardAreas()
+        if ga then
+            for _, area in ipairs(ga:GetChildren()) do
+                for _, nests in ipairs(area:GetDescendants()) do
+                    if nests.Name == "Nests" then
+                        for _, d in ipairs(nests:GetDescendants()) do consider(d) end
                     end
                 end
             end
+        end
+        -- Loose eggs folder (eggs dropped / spawned in the world, not in a pen)
+        local loose = workspace:FindFirstChild("Eggs")
+        if loose then
+            for _, c in ipairs(loose:GetChildren()) do consider(c) end
         end
 
         -- Keep only the top-most match so a model and its parts aren't listed separately.
@@ -181,15 +233,10 @@ return function(parent, ctx)
             local ancestor = inst.Parent
             local nested = false
             while ancestor and ancestor ~= workspace do
-                if set[ancestor] then
-                    nested = true
-                    break
-                end
+                if set[ancestor] then nested = true break end
                 ancestor = ancestor.Parent
             end
-            if not nested then
-                eggs[#eggs + 1] = inst
-            end
+            if not nested then eggs[#eggs + 1] = inst end
         end
         return eggs
     end
@@ -430,11 +477,11 @@ return function(parent, ctx)
         end)
 
         if #entries == 0 then
-            status.Text = "No eggs found in the server"
+            status.Text = "No stealable eggs found"
             local empty = Instance.new("TextLabel")
             empty.Size = UDim2.new(1, 0, 0, 60)
             empty.BackgroundTransparency = 1
-            empty.Text = "No real eggs found (nest parts are ignored).\nPress Debug and send me the output."
+            empty.Text = "No eggs in the guarded nests right now.\nPress Deep and send me the first 40 lines."
             empty.TextColor3 = MUTED
             empty.Font = Enum.Font.Gotham
             empty.TextSize = 12
@@ -443,7 +490,7 @@ return function(parent, ctx)
             return
         end
 
-        status.Text = ("Eggs in server: %d"):format(#entries)
+        status.Text = ("Stealable eggs: %d"):format(#entries)
 
         for i, e in ipairs(entries) do
             local row = Instance.new("Frame")
@@ -490,6 +537,8 @@ return function(parent, ctx)
             info.BackgroundTransparency = 1
             local owner = e.owner
             if owner == player.Name then owner = "You" end
+            local nestArea = areaOf(e.inst)
+            if nestArea then owner = "Nest: " .. nestArea end
             local dist = e.dist and (math.floor(e.dist) .. " studs") or "? studs"
             info.Text = (owner or "Unknown owner") .. "  |  " .. dist
             info.TextColor3 = MUTED
@@ -627,7 +676,31 @@ return function(parent, ctx)
     end
 
     local function deepDebug()
-        local lines = { "BananaHub DEEP debug v2 - GameId " .. tostring(game.GameId) }
+        local lines = { "BananaHub DEEP debug v3 - GameId " .. tostring(game.GameId) }
+        lines[#lines + 1] = "Stealable found: " .. #lastEggs
+        for i, e in ipairs(lastEggs) do
+            if i > 5 then break end
+            lines[#lines + 1] = "  " .. e:GetFullName():gsub("^Workspace%.World%.Areas%.", "") .. " (" .. e.ClassName .. ")"
+        end
+        local ga = guardAreas()
+        lines[#lines + 1] = "== GuardAreas " .. (ga and ("(" .. #ga:GetChildren() .. " areas)") or "MISSING")
+        if ga then
+            for ai, area in ipairs(ga:GetChildren()) do
+                if ai > 2 then break end
+                local nests = area:FindFirstChild("Nests", true)
+                lines[#lines + 1] = " AREA " .. area.Name .. " nests=" .. tostring(nests and #nests:GetChildren())
+                if nests then
+                    for ni, nest in ipairs(nests:GetChildren()) do
+                        if ni > 2 then break end
+                        describe(nest, lines, 2)
+                        for ci, c in ipairs(nest:GetChildren()) do
+                            if ci > 6 then break end
+                            describe(c, lines, 4)
+                        end
+                    end
+                end
+            end
+        end
         local per = workspace:FindFirstChild("PlacedEggRenders")
         lines[#lines + 1] = "== PlacedEggRenders full (" .. (per and #per:GetChildren() or 0) .. ")"
         if per then

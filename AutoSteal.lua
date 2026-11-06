@@ -481,7 +481,7 @@ return function(parent, ctx)
             local empty = Instance.new("TextLabel")
             empty.Size = UDim2.new(1, 0, 0, 60)
             empty.BackgroundTransparency = 1
-            empty.Text = "No eggs in the guarded nests right now.\nPress Deep and send me the first 40 lines."
+            empty.Text = "No eggs in the guarded nests right now.\nPress Deep and screenshot the box that opens."
             empty.TextColor3 = MUTED
             empty.Font = Enum.Font.Gotham
             empty.TextSize = 12
@@ -565,10 +565,112 @@ return function(parent, ctx)
     end
 
     ----------------------------------------------------------------
+    -- Output box (selectable text, because clipboard may not work)
+    ----------------------------------------------------------------
+    local function tryClipboard(text)
+        local fns = {}
+        if setclipboard then fns[#fns + 1] = setclipboard end
+        if toclipboard then fns[#fns + 1] = toclipboard end
+        if setrbxclipboard then fns[#fns + 1] = setrbxclipboard end
+        if Clipboard and type(Clipboard) == "table" and Clipboard.set then fns[#fns + 1] = Clipboard.set end
+        for _, f in ipairs(fns) do
+            if pcall(f, text) then return true end
+        end
+        return false
+    end
+
+    local overlay = Instance.new("Frame")
+    overlay.Name = "Output"
+    overlay.Size = UDim2.fromScale(1, 1)
+    overlay.BackgroundColor3 = Color3.fromRGB(24, 26, 32)
+    overlay.BorderSizePixel = 0
+    overlay.ZIndex = 50
+    overlay.Visible = false
+    overlay.Parent = root
+
+    local outTitle = Instance.new("TextLabel")
+    outTitle.Size = UDim2.new(1, -150, 0, 24)
+    outTitle.BackgroundTransparency = 1
+    outTitle.TextColor3 = TEXT
+    outTitle.Font = Enum.Font.GothamMedium
+    outTitle.TextSize = 12
+    outTitle.TextXAlignment = Enum.TextXAlignment.Left
+    outTitle.TextTruncate = Enum.TextTruncate.AtEnd
+    outTitle.ZIndex = 51
+    outTitle.Parent = overlay
+
+    local function overlayButton(text, xOffset)
+        local b = makeButton(text, 64, xOffset)
+        b.Parent = overlay
+        b.ZIndex = 52
+        return b
+    end
+    local closeOut = overlayButton("Close", 0)
+    local copyOut = overlayButton("Copy", 70)
+
+    local outScroll = Instance.new("ScrollingFrame")
+    outScroll.Position = UDim2.new(0, 0, 0, 30)
+    outScroll.Size = UDim2.new(1, 0, 1, -30)
+    outScroll.BackgroundColor3 = ROW
+    outScroll.BorderSizePixel = 0
+    outScroll.ScrollBarThickness = 6
+    outScroll.ScrollBarImageColor3 = GOLD
+    outScroll.CanvasSize = UDim2.new()
+    outScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    outScroll.ZIndex = 51
+    outScroll.Parent = overlay
+
+    local outBox = Instance.new("TextBox")
+    outBox.Size = UDim2.new(1, -10, 0, 0)
+    outBox.Position = UDim2.new(0, 4, 0, 2)
+    outBox.AutomaticSize = Enum.AutomaticSize.Y
+    outBox.BackgroundTransparency = 1
+    outBox.MultiLine = true
+    outBox.ClearTextOnFocus = false
+    pcall(function() outBox.TextEditable = true end)
+    outBox.TextWrapped = true
+    outBox.TextXAlignment = Enum.TextXAlignment.Left
+    outBox.TextYAlignment = Enum.TextYAlignment.Top
+    outBox.Font = Enum.Font.Code
+    outBox.TextSize = 11
+    outBox.TextColor3 = Color3.fromRGB(230, 230, 230)
+    outBox.ZIndex = 52
+    outBox.Parent = outScroll
+
+    local outText = ""
+    local function showOutput(title, text)
+        outText = text
+        -- keep the box light: first 150 lines on screen, full text in console
+        local shown, n = {}, 0
+        for line in string.gmatch(text .. "\n", "(.-)\n") do
+            n += 1
+            if n <= 150 then shown[#shown + 1] = line end
+        end
+        outBox.Text = table.concat(shown, "\n")
+        outScroll.CanvasPosition = Vector2.new(0, 0)
+        local copied = tryClipboard(text)
+        outTitle.Text = title .. (copied and "  (copied)" or "  (copy failed - screenshot this)")
+        overlay.Visible = true
+        print(text)
+    end
+
+    closeOut.Activated:Connect(function() overlay.Visible = false end)
+    copyOut.Activated:Connect(function()
+        local ok = tryClipboard(outText)
+        copyOut.Text = ok and "Copied!" or "Failed"
+        task.delay(1.5, function() if copyOut.Parent then copyOut.Text = "Copy" end end)
+    end)
+
+    ----------------------------------------------------------------
     -- Buttons
     ----------------------------------------------------------------
     local function connect(button, fn)
-        button.Activated:Connect(fn)
+        button.Activated:Connect(function()
+            local ok, err = pcall(fn)
+            if not ok then
+                showOutput("Error", "BananaHub error:\n" .. tostring(err))
+            end
+        end)
     end
 
     connect(refreshButton, refresh)
@@ -633,13 +735,7 @@ return function(parent, ctx)
         for _, child in ipairs(workspace:GetChildren()) do
             lines[#lines + 1] = "  " .. child.Name .. " (" .. child.ClassName .. ")"
         end
-        local text = table.concat(lines, "\n")
-        print(text)
-        local copied = false
-        if setclipboard then
-            copied = pcall(setclipboard, text)
-        end
-        status.Text = copied and "Debug copied to clipboard (also in console)" or "Debug printed to console"
+        showOutput("Debug", table.concat(lines, "\n"))
     end)
 
 
@@ -777,11 +873,7 @@ return function(parent, ctx)
                 lines[#lines + 1] = "  " .. d:GetFullName():gsub("^ReplicatedStorage%.", "") .. " (" .. d.ClassName .. ")"
             end
         end
-        local text = table.concat(lines, "\n")
-        print(text)
-        local copied = false
-        if setclipboard then copied = pcall(setclipboard, text) end
-        status.Text = copied and "Deep debug copied to clipboard" or "Deep debug printed to console"
+        showOutput("Deep v3", table.concat(lines, "\n"))
     end
 
     connect(deepButton, deepDebug)

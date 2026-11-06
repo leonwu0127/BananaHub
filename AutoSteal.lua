@@ -212,7 +212,31 @@ return function(parent, ctx)
         return nil
     end
 
+    local nameCache = {} -- [userId] = name | false (pending)
+    local function nameFromUserId(id)
+        local p = Players:GetPlayerByUserId(id)
+        if p then return p.Name end
+        if nameCache[id] then return nameCache[id] end
+        if nameCache[id] == nil then
+            nameCache[id] = false
+            task.spawn(function()
+                local ok, n = pcall(function() return Players:GetNameFromUserIdAsync(id) end)
+                nameCache[id] = ok and n or ("User " .. id)
+            end)
+        end
+        return nil
+    end
+
+    -- PlacedEggRenders children are named "<OwnerUserId>_<32 hex guid>"
+    local function splitRenderName(name)
+        local id, guid = string.match(name, "^(%d+)_(%x+)$")
+        if id and #guid >= 16 then return tonumber(id), guid end
+        return nil, nil
+    end
+
     local function findOwner(inst)
+        local uid = splitRenderName(inst.Name)
+        if uid then return nameFromUserId(uid) end
         local _, nums = parseName(inst.Name)
         for _, n in ipairs(nums) do
             local p = Players:GetPlayerByUserId(n)
@@ -267,7 +291,44 @@ return function(parent, ctx)
         return false
     end
 
+    local function petInfo(model)
+        local data = model:FindFirstChild("Data")
+        local function txt(n)
+            local l = data and data:FindFirstChild(n, true)
+            return l and l:IsA("TextLabel") and l.Text ~= "" and l.Text or nil
+        end
+        local name = txt("DisplayName") or model:GetAttribute("OriginalName")
+        if not name then return nil end
+        local extra = {}
+        local odds, ps = txt("Odds"), txt("PerSecond")
+        if odds then extra[#extra + 1] = odds end
+        if ps then extra[#extra + 1] = ps end
+        if #extra > 0 then name = name .. " (" .. table.concat(extra, ", ") .. ")" end
+        return tostring(name)
+    end
+
+    local function findPetByGuid(guid)
+        local cra = workspace:FindFirstChild("ClientRenderedAssets")
+        if not cra or not guid then return nil end
+        local lg = string.lower(guid)
+        for _, m in ipairs(cra:GetChildren()) do
+            local uid = m:GetAttribute("UID")
+            if (uid and string.lower(tostring(uid)) == lg) or string.find(string.lower(m.Name), lg, 1, true) then
+                return petInfo(m)
+            end
+        end
+        return nil
+    end
+
     local function findContents(inst)
+        local _, guid = splitRenderName(inst.Name)
+        local byGuid = findPetByGuid(guid)
+        if byGuid then return byGuid end
+        for _, d in ipairs(inst:GetDescendants()) do
+            for k, v in pairs(d:GetAttributes()) do
+                if keyMatches(k) or k == "OriginalName" or k == "DisplayName" then return tostring(v) end
+            end
+        end
         local found = {}
         local function add(v)
             v = tostring(v)
@@ -402,6 +463,11 @@ return function(parent, ctx)
             name.BackgroundTransparency = 1
             local kind, _, area = parseName(e.inst.Name)
             local title = prettyKind(kind)
+            local rid, rguid = splitRenderName(e.inst.Name)
+            if rid then
+                title = "Egg " .. i
+                area = ""
+            end
             for _, key in ipairs({ "EggName", "EggType", "DisplayName", "PetName" }) do
                 local v = e.inst:GetAttribute(key)
                 if v ~= nil then title = tostring(v) break end
@@ -561,7 +627,48 @@ return function(parent, ctx)
     end
 
     local function deepDebug()
-        local lines = { "BananaHub DEEP debug - GameId " .. tostring(game.GameId) }
+        local lines = { "BananaHub DEEP debug v2 - GameId " .. tostring(game.GameId) }
+        local per = workspace:FindFirstChild("PlacedEggRenders")
+        lines[#lines + 1] = "== PlacedEggRenders full (" .. (per and #per:GetChildren() or 0) .. ")"
+        if per then
+            for i, egg in ipairs(per:GetChildren()) do
+                if i > 3 then break end
+                local uid, guid = splitRenderName(egg.Name)
+                lines[#lines + 1] = "EGG " .. egg.Name .. " owner=" .. tostring(uid and nameFromUserId(uid))
+                for k, v in pairs(egg:GetAttributes()) do lines[#lines + 1] = "  attr " .. k .. "=" .. tostring(v) end
+                local c = 0
+                for _, d in ipairs(egg:GetDescendants()) do
+                    if c >= 10 then break end
+                    c += 1
+                    local extra = ""
+                    if d:IsA("MeshPart") then extra = " mesh=" .. d.MeshId .. " tex=" .. d.TextureID end
+                    if d:IsA("BasePart") then extra = extra .. " color=" .. tostring(d.BrickColor) end
+                    for k, v in pairs(d:GetAttributes()) do extra = extra .. " @" .. k .. "=" .. tostring(v) end
+                    lines[#lines + 1] = "  " .. d.Name .. ":" .. d.ClassName .. extra
+                end
+                -- does the guid appear anywhere else?
+                local hits = 0
+                if guid then
+                    local lg = string.lower(guid)
+                    for _, svc in ipairs({ workspace, game:GetService("ReplicatedStorage"), player }) do
+                        for _, d in ipairs(svc:GetDescendants()) do
+                            if hits >= 4 then break end
+                            if d ~= egg and not d:IsDescendantOf(egg) then
+                                local hit = string.find(string.lower(d.Name), lg, 1, true)
+                                if not hit then
+                                    for k, v in pairs(d:GetAttributes()) do
+                                        if string.find(string.lower(tostring(v)), lg, 1, true) then hit = true; break end
+                                    end
+                                end
+                                if not hit and d:IsA("StringValue") and string.find(string.lower(d.Value), lg, 1, true) then hit = true end
+                                if hit then hits += 1; lines[#lines + 1] = "  GUID HIT " .. d:GetFullName() .. " (" .. d.ClassName .. ")" end
+                            end
+                        end
+                    end
+                end
+                if hits == 0 then lines[#lines + 1] = "  guid not found elsewhere" end
+            end
+        end
         for _, folderName in ipairs({ "Eggs", "PlacedEggRenders", "ClientRenderedAssets", "Plots", "Stands", "ClientMountedPets" }) do
             local f = workspace:FindFirstChild(folderName)
             lines[#lines + 1] = "== Workspace." .. folderName .. (f and (" (" .. #f:GetChildren() .. " children)") or " MISSING")

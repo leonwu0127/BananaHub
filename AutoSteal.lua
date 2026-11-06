@@ -490,6 +490,45 @@ return function(parent, ctx)
         return nil
     end
 
+    local meshName
+    -- MeshId -> template name, built once from ReplicatedStorage / named egg folders
+    local meshIndex
+    local function buildMeshIndex()
+        meshIndex = {}
+        local roots = { game:GetService("ReplicatedStorage") }
+        for _, c in ipairs(workspace:GetChildren()) do
+            if string.find(string.lower(c.Name), "egg", 1, true) and c.Name ~= "PlacedEggRenders" then
+                roots[#roots + 1] = c
+            end
+        end
+        for _, root in ipairs(roots) do
+            for _, d in ipairs(root:GetDescendants()) do
+                if d:IsA("MeshPart") and d.MeshId ~= "" and not meshIndex[d.MeshId] then
+                    -- walk up to the first ancestor whose name is a real name
+                    local a = d.Parent
+                    while a and a ~= root do
+                        local n = a.Name
+                        local low = string.lower(n)
+                        if a:IsA("Model") and not string.match(low, "^untitled") and not string.match(n, "^%x+$")
+                            and low ~= "model" and low ~= "egg" and low ~= "eggs" and low ~= "assets" then
+                            meshIndex[d.MeshId] = n
+                            break
+                        end
+                        a = a.Parent
+                    end
+                end
+            end
+        end
+    end
+    meshName = function(inst)
+        if not meshIndex then pcall(buildMeshIndex) end
+        if not meshIndex then return nil end
+        for _, d in ipairs(inst:GetDescendants()) do
+            if d:IsA("MeshPart") and meshIndex[d.MeshId] then return meshIndex[d.MeshId] end
+        end
+        return nil
+    end
+
     local function hatchName(inst)
         -- PreparedSourceName = "Workspace.NewEnchantedEggs.CelestialSunlion" -> "Celestial Sunlion"
         local function fromPath(v)
@@ -513,11 +552,15 @@ return function(parent, ctx)
             if d:IsA("Model") or d:IsA("MeshPart") then
                 local n = d.Name
                 local low = string.lower(n)
-                if not GENERIC[low] and not string.match(n, "^%x+$") and not string.match(n, "^%d") then
+                if not GENERIC[low] and not string.match(low, "^untitled") and not string.match(low, "union")
+                    and not string.match(n, "^%x+$") and not string.match(n, "^%d") then
                     return fromPath(n)
                 end
             end
         end
+        -- last try: match the egg's mesh against named egg templates in the game
+        local named = meshName(inst)
+        if named then return fromPath(named) end
         return nil
     end
     local function isIdName(name)

@@ -245,7 +245,7 @@ local function openFeature(title, fileName)
 
     task.spawn(function()
         local ok, result = pcall(function()
-            local source = game:HttpGet(RAW_BASE .. fileName)
+            local source = game:HttpGet(RAW_BASE .. fileName .. "?nocache=" .. tostring(os.time()))
             local chunk, compileError = loadstring(source)
             if not chunk then
                 error(compileError, 0)

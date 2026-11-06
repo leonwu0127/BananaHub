@@ -50,8 +50,8 @@ return function(parent, ctx)
     local debugButton = makeButton("Debug", 54, 140)
     local deepButton = makeButton("Deep", 48, 200)
     local sortButton = makeButton("Sort: Near", 96, 254)
-    local speedButton = makeButton("Back: Safe", 80, 356)
-    local SPEED_MODES = { "Safe", "Fast", "Walk" }
+    local speedButton = makeButton("Back: TP", 80, 356)
+    local SPEED_MODES = { "TP", "Tween", "Safe", "Walk" }
     local speedMode = 1
     speedButton.MouseButton1Click:Connect(function()
         speedMode = speedMode % #SPEED_MODES + 1
@@ -1159,6 +1159,60 @@ return function(parent, ctx)
             c:Disconnect()
         end
     end
+    -- ghost mode: no collisions and no touch events on our character (kill parts / hitboxes can't fire)
+    local function setGhost(char, on, saved)
+        for _, d in ipairs(char:GetDescendants()) do
+            if d:IsA("BasePart") then
+                if on then
+                    if saved[d] == nil then saved[d] = { d.CanCollide, d.CanTouch } end
+                    d.CanCollide = false
+                    d.CanTouch = false
+                elseif saved[d] then
+                    pcall(function() d.CanCollide = saved[d][1]; d.CanTouch = saved[d][2] end)
+                end
+            end
+        end
+    end
+    -- real TweenService tween of the root (like Vyral Hub), ghosted the whole way
+    local TweenService = game:GetService("TweenService")
+    local function tweenTo(hrp, target, speed, log)
+        local char = hrp.Parent
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local dist = (target - hrp.Position).Magnitude
+        if dist < 0.5 then return end
+        local saved = {}
+        local hb = RunService.Stepped:Connect(function()
+            if char then setGhost(char, true, saved) end
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end)
+        local flatLook = Vector3.new(target.X, hrp.Position.Y, target.Z)
+        local goal = CFrame.new(target)
+        if (flatLook - hrp.Position).Magnitude > 0.1 then
+            goal = CFrame.lookAt(target, target + (flatLook - hrp.Position).Unit)
+        end
+        local tw = TweenService:Create(hrp, TweenInfo.new(dist / speed, Enum.EasingStyle.Linear), { CFrame = goal })
+        local finished = false
+        local fc = tw.Completed:Connect(function() finished = true end)
+        tw:Play()
+        local t0, nextLog = os.clock(), 1
+        while not finished and alive and hrp.Parent do
+            if hum and hum.Health <= 0 then tw:Cancel() break end
+            task.wait(0.05)
+            if log and os.clock() - t0 >= nextLog then
+                nextLog = nextLog + 1
+                local hp = hrp.Position
+                log[#log + 1] = string.format("  t=%.0fs at (%.0f, %.0f, %.0f)", os.clock() - t0, hp.X, hp.Y, hp.Z)
+            end
+        end
+        fc:Disconnect()
+        hb:Disconnect()
+        task.wait(0.1)
+        if char then setGhost(char, false, saved) end
+    end
+
     local function glide(hrp, target, speed)
         local from = hrp.Position
         local dist = (target - from).Magnitude
@@ -1335,10 +1389,23 @@ return function(parent, ctx)
             if mode == "Walk" then
                 status.Text = "Got it! Walking back..."
                 walkBack(hum2, h2, before, log)
-            elseif mode == "Fast" then
-                glide(h2, h2.Position + Vector3.new(0, 6, 0), TWEEN_SPEED)
-                glide(h2, Vector3.new(before.X, home.Y + 6, before.Z), TWEEN_SPEED)
-                glide(h2, Vector3.new(before.X, home.Y, before.Z), TWEEN_SPEED)
+            elseif mode == "TP" then
+                status.Text = "Got it! Teleporting back..."
+                local tgt = before + Vector3.new(0, 3, 0)
+                h2.CFrame = CFrame.new(tgt, Vector3.new(home.X, tgt.Y, home.Z))
+                pcall(function() h2.AssemblyLinearVelocity = Vector3.zero end)
+                task.wait(0.6)
+                local off = (h2.Position - tgt).Magnitude
+                log[#log + 1] = string.format("  TP back -> 0.6s later %.1f studs away", off)
+                local still = carrying(egg, player.Character, pos)
+                log[#log + 1] = "  still carrying after TP: " .. tostring(still)
+                if off > 8 and hum2.Health > 0 then
+                    log[#log + 1] = "  pulled back, tweening instead"
+                    tweenTo(h2, tgt, TWEEN_SPEED, log)
+                end
+            elseif mode == "Tween" then
+                status.Text = "Got it! Tweening back..."
+                tweenTo(h2, before + Vector3.new(0, 3, 0), TWEEN_SPEED, log)
             else
                 groundGlide(h2, before, SAFE_SPEED, log)
             end
@@ -1462,7 +1529,7 @@ return function(parent, ctx)
         print(text)
     end
     showStealLog = function()
-        showOutput("Steal log v10 (screenshot this)", table.concat(lastStealLog, "\n"))
+        showOutput("Steal log v11 (screenshot this)", table.concat(lastStealLog, "\n"))
     end
 
     closeOut.Activated:Connect(function() overlay.Visible = false end)

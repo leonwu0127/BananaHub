@@ -1081,35 +1081,105 @@ return function(parent, ctx)
         return ok, "InputHoldBegin"
     end
 
+    -- Fast glide (sets the root CFrame every frame, so walls / falling don't stop it)
+    local RunService = game:GetService("RunService")
+    local TWEEN_SPEED = 110   -- studs per second on the way back
+    local WALK_LAST = 14      -- walk this many studs at the end to claim
+    local function glide(hrp, target, speed)
+        local from = hrp.Position
+        local dist = (target - from).Magnitude
+        if dist < 0.5 then return end
+        local t, total = 0, dist / speed
+        while t < total and alive and hrp.Parent do
+            t = t + RunService.Heartbeat:Wait()
+            local a = math.min(t / total, 1)
+            local p = from:Lerp(target, a)
+            local look = Vector3.new(target.X, p.Y, target.Z)
+            if (look - p).Magnitude > 0.1 then hrp.CFrame = CFrame.lookAt(p, look) else hrp.CFrame = CFrame.new(p) end
+            pcall(function()
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
+
+    -- Did we pick the egg up? (egg moved into our character, or follows us, or vanished from the nest)
+    local function carrying(egg, char, startPos)
+        if not egg or not egg.Parent then return true end
+        if egg:IsDescendantOf(char) then return true end
+        for _, d in ipairs(char:GetDescendants()) do
+            if (d:IsA("Model") or d:IsA("BasePart")) and string.match(d.Name, "^%x+$") and #d.Name >= 32 then return true end
+            if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("RigidConstraint") then
+                local other = d.Part1 or d.Part0
+                if other and other:IsDescendantOf(egg) then return true end
+            end
+        end
+        local p = positionOf(egg)
+        return p ~= nil and startPos ~= nil and (p - startPos).Magnitude > 4
+    end
+
     stealEgg = function(egg)
         if stealing then return end
         stealing = true
         local ok, err = pcall(function()
             local char = player.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            if not hrp then status.Text = "No character" return end
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum then status.Text = "No character" return end
             if not egg or not egg.Parent then status.Text = "That egg is gone" return end
             local pos = positionOf(egg)
             if not pos then status.Text = "Can't find egg position" return end
-            local home = hrp.CFrame
-            status.Text = "Teleporting..."
+            local home = hrp.Position -- stand at your base when you press Steal
+            status.Text = "Teleporting to egg..."
             hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-            task.wait(0.35)
-            promptCacheAt = 0 -- rescan prompts near the egg
-            local pp = promptFor(egg, 16)
-            if not pp then
-                status.Text = "No steal prompt found at this egg (press Deep)"
-                return
-            end
-            local pp_pos = promptPos(pp)
-            if pp_pos then hrp.CFrame = CFrame.new(pp_pos + Vector3.new(0, 2, 0)) task.wait(0.2) end
+            task.wait(0.3)
+            promptCacheAt = 0
+            local pp = promptFor(egg, 18)
+            if not pp then status.Text = "No steal prompt at this egg (press Deep)" return end
+            local ppPos = promptPos(pp) or pos
+            -- stand right next to the prompt, facing it
+            local stand = ppPos + Vector3.new(0, 2.5, 0)
+            hrp.CFrame = CFrame.new(stand + Vector3.new(2, 0, 0), stand)
+            task.wait(0.25)
             local fired, how = firePrompt(pp)
-            status.Text = fired and ("Steal sent (" .. how .. ")") or "Prompt failed"
-            task.wait(0.6)
-            if autoReturn then
-                local h2 = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-                if h2 then h2.CFrame = home end
+            status.Text = fired and ("Picking up (" .. how .. ")...") or "Prompt failed"
+            -- wait until we are holding it (max 2.5 s)
+            local got = false
+            local t0 = os.clock()
+            while os.clock() - t0 < 2.5 do
+                if carrying(egg, char, pos) then got = true break end
+                task.wait(0.1)
             end
+            if not got then
+                -- second try: real hold
+                pcall(function()
+                    pp:InputHoldBegin()
+                    task.wait((pp.HoldDuration or 0) + 0.2)
+                    pp:InputHoldEnd()
+                end)
+                task.wait(0.5)
+                got = carrying(egg, char, pos)
+            end
+            status.Text = got and "Got it! Gliding back..." or "Not sure it picked up, gliding back anyway..."
+            -- glide back to just before your base, then walk the last bit to claim
+            local h2 = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            local hum2 = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
+            if not h2 or not hum2 then return end
+            local flat = Vector3.new(home.X - h2.Position.X, 0, home.Z - h2.Position.Z)
+            local dir = flat.Magnitude > 0.1 and flat.Unit or Vector3.new(1, 0, 0)
+            local before = home - dir * WALK_LAST
+            -- go up a little first so we don't drag through the nest
+            glide(h2, h2.Position + Vector3.new(0, 6, 0), TWEEN_SPEED)
+            glide(h2, Vector3.new(before.X, home.Y + 6, before.Z), TWEEN_SPEED)
+            glide(h2, Vector3.new(before.X, home.Y, before.Z), TWEEN_SPEED)
+            status.Text = "Walking in to claim..."
+            hum2:MoveTo(home)
+            local done = false
+            local c = hum2.MoveToFinished:Connect(function() done = true end)
+            local t1 = os.clock()
+            while not done and os.clock() - t1 < 4 do task.wait(0.1) end
+            c:Disconnect()
+            status.Text = got and "Stolen - walked into base" or "Back at base (check if the egg came with you)"
         end)
         stealing = false
         if not ok then status.Text = "Steal error: " .. tostring(err) end

@@ -62,9 +62,13 @@ return function(parent, ctx)
     local selectedEgg = nil
     local stealing = false
     local showStealLog -- set after the output box exists
+    local logButton = makeButton("Log", 40, 442)
+    logButton.MouseButton1Click:Connect(function()
+        if showStealLog then showStealLog() end
+    end)
 
     local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -442, 0, 24)
+    status.Size = UDim2.new(1, -488, 0, 24)
     status.BackgroundTransparency = 1
     status.Text = "Scanning..."
     status.TextColor3 = TEXT
@@ -1289,6 +1293,59 @@ return function(parent, ctx)
             end)
         end)
         local got, why = false, nil
+        local stealT0 = os.clock()
+        local stage = "start"
+        local watchConns = {}
+        local ghostSaved, ghostConn = {}, nil
+        local function stopGhost()
+            if ghostConn then ghostConn:Disconnect() ghostConn = nil end
+            local c = player.Character
+            if c then setGhost(c, false, ghostSaved) end
+            ghostSaved = {}
+        end
+        local function stopWatch()
+            for _, cn in ipairs(watchConns) do pcall(function() cn:Disconnect() end) end
+            watchConns = {}
+        end
+        do
+            local c0 = player.Character
+            local hum0 = c0 and c0:FindFirstChildOfClass("Humanoid")
+            local hrp0 = c0 and c0:FindFirstChild("HumanoidRootPart")
+            if hum0 then
+                watchConns[#watchConns + 1] = hum0.Died:Connect(function()
+                    log[#log + 1] = string.format("!! DIED at %.1fs, stage=%s, at %s", os.clock() - stealT0, stage, fmtV(hrp0 and hrp0.Position))
+                    status.Text = "Died (" .. stage .. ") - log opened"
+                    if showStealLog then pcall(showStealLog) end
+                end)
+                local lastHp0 = hum0.Health
+                watchConns[#watchConns + 1] = hum0.HealthChanged:Connect(function(hp)
+                    if hp < lastHp0 then
+                        log[#log + 1] = string.format("  damage %.0f -> %.0f at %.1fs, stage=%s", lastHp0, hp, os.clock() - stealT0, stage)
+                    end
+                    lastHp0 = hp
+                end)
+            end
+            watchConns[#watchConns + 1] = player.CharacterAdded:Connect(function()
+                log[#log + 1] = string.format("!! RESPAWNED at %.1fs, stage=%s", os.clock() - stealT0, stage)
+                if showStealLog then pcall(showStealLog) end
+            end)
+            -- position jumps we did not cause (server teleported us = caught?)
+            if hrp0 then
+                local lastP, lastT = hrp0.Position, os.clock()
+                watchConns[#watchConns + 1] = RunService.Heartbeat:Connect(function()
+                    if not hrp0.Parent then return end
+                    local p0 = hrp0.Position
+                    local now = os.clock()
+                    if now - lastT > 0.25 then
+                        local jump = (p0 - lastP).Magnitude
+                        if jump > 60 and stage ~= "tp-to-egg" and stage ~= "tp-back" then
+                            log[#log + 1] = string.format("!! JUMPED %.0f studs at %.1fs, stage=%s, now %s", jump, now - stealT0, stage, fmtV(p0))
+                        end
+                        lastP, lastT = p0, now
+                    end
+                end)
+            end
+        end
         local ok, err = pcall(function()
             local char = player.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -1315,7 +1372,20 @@ return function(parent, ctx)
                 log[#log + 1] = string.format("  %.1f studs: ", near[i][2]) .. describePrompt(near[i][1])
             end
             status.Text = "Going to egg..."
-            if not goTo(hrp, pos + Vector3.new(0, 3, 0), log) then
+            stage = "tp-to-egg"
+            local pinCF = nil
+            ghostConn = RunService.Stepped:Connect(function()
+                if char.Parent then setGhost(char, true, ghostSaved) end
+                if pinCF and hrp.Parent then hrp.CFrame = pinCF end
+                pcall(function()
+                    hrp.AssemblyLinearVelocity = Vector3.zero
+                    hrp.AssemblyAngularVelocity = Vector3.zero
+                end)
+            end)
+            log[#log + 1] = string.format("[%.1fs] ghost ON (no touch/collide) for approach + pickup", os.clock() - stealT0)
+            local gotThere = goTo(hrp, pos + Vector3.new(0, 3, 0), log)
+            stage = "at-egg"
+            if not gotThere then
                 status.Text = "Server keeps pulling me back - see log"
                 return
             end
@@ -1326,7 +1396,10 @@ return function(parent, ctx)
             local ppPos = promptPos(pp) or pos
             local stand = ppPos + Vector3.new(0, 2.5, 0)
             hrp.CFrame = CFrame.new(stand + Vector3.new(2, 0, 0), stand)
+            pinCF = hrp.CFrame
             task.wait(0.3)
+            stage = "pickup"
+            log[#log + 1] = string.format("[%.1fs] at prompt, picking up", os.clock() - stealT0)
             log[#log + 1] = string.format("Standing %.1f studs from prompt", (hrp.Position - ppPos).Magnitude)
             -- try 1: executor fire
             local fired, how = firePrompt(pp)
@@ -1354,12 +1427,34 @@ return function(parent, ctx)
                     task.wait(0.1)
                 end
             end
-            log[#log + 1] = "Picked up: " .. tostring(got) .. (why and (" (" .. why .. ")") or "")
+            pinCF = nil
+            log[#log + 1] = string.format("[%.1fs] ", os.clock() - stealT0) .. "Picked up: " .. tostring(got) .. (why and (" (" .. why .. ")") or "")
             if not got then
                 status.Text = "Didn't pick it up - try pressing E yourself now, then tell me"
                 return -- stay here so you can test the prompt by hand
             end
             status.Text = "Got it! Gliding back..."
+            stopGhost()
+            stage = "return"
+            -- watch whether we keep the egg on the way back
+            do
+                local lostLogged = false
+                task.spawn(function()
+                    while stealing and stage ~= "done" and alive do
+                        task.wait(0.5)
+                        local c2 = player.Character
+                        if not c2 or lostLogged then break end
+                        local still = carrying(egg, c2, pos)
+                        if not still then
+                            lostLogged = true
+                            local hp = c2:FindFirstChild("HumanoidRootPart")
+                            log[#log + 1] = string.format("!! LOST THE EGG at %.1fs, stage=%s, at %s", os.clock() - stealT0, stage, fmtV(hp and hp.Position))
+                            status.Text = "Lost the egg (" .. stage .. ") - log opened"
+                            if showStealLog then pcall(showStealLog) end
+                        end
+                    end
+                end)
+            end
             local h2 = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
             local hum2 = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
             if not h2 or not hum2 then return end
@@ -1391,6 +1486,7 @@ return function(parent, ctx)
                 walkBack(hum2, h2, before, log)
             elseif mode == "TP" then
                 status.Text = "Got it! Teleporting back..."
+                stage = "tp-back"
                 local tgt = before + Vector3.new(0, 3, 0)
                 h2.CFrame = CFrame.new(tgt, Vector3.new(home.X, tgt.Y, home.Z))
                 pcall(function() h2.AssemblyLinearVelocity = Vector3.zero end)
@@ -1399,6 +1495,7 @@ return function(parent, ctx)
                 log[#log + 1] = string.format("  TP back -> 0.6s later %.1f studs away", off)
                 local still = carrying(egg, player.Character, pos)
                 log[#log + 1] = "  still carrying after TP: " .. tostring(still)
+                stage = "return"
                 if off > 8 and hum2.Health > 0 then
                     log[#log + 1] = "  pulled back, tweening instead"
                     tweenTo(h2, tgt, TWEEN_SPEED, log)
@@ -1417,6 +1514,7 @@ return function(parent, ctx)
             end
             log[#log + 1] = "Back, now " .. string.format("%.1f", (h2.Position - before).Magnitude) .. " studs from target"
             status.Text = "Walking in to claim..."
+            stage = "walk-in"
             hum2:MoveTo(home)
             local done = false
             local c = hum2.MoveToFinished:Connect(function() done = true end)
@@ -1425,8 +1523,12 @@ return function(parent, ctx)
             c:Disconnect()
             log[#log + 1] = "Walked in, " .. string.format("%.1f", (h2.Position - home).Magnitude) .. " studs from home"
             status.Text = "Stolen - walked into base"
+            stage = "done"
         end)
         if trigConn then trigConn:Disconnect() end
+        stage = "done"
+        pcall(stopGhost)
+        pcall(stopWatch)
         if not ok then status.Text = "Steal error: " .. tostring(err) log[#log + 1] = "ERROR: " .. tostring(err) end
         log[#log + 1] = "Remote events during steal:"
         local any = false
@@ -1529,7 +1631,7 @@ return function(parent, ctx)
         print(text)
     end
     showStealLog = function()
-        showOutput("Steal log v11 (screenshot this)", table.concat(lastStealLog, "\n"))
+        showOutput("Steal log v12 (screenshot this)", table.concat(lastStealLog, "\n"))
     end
 
     closeOut.Activated:Connect(function() overlay.Visible = false end)

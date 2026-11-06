@@ -242,6 +242,7 @@ return function(parent, ctx)
     local SKIP_TOP = { World = true, Plots = true, PlacedEggRenders = true, ClientRenderedAssets = true,
         Terrain = true, Camera = true, ClientMountedPets = true }
     nestOfEgg = {} -- [egg] = area name
+    local spotOfEgg = {} -- [egg] = nest model (for one-egg-per-nest dedupe)
 
     local function positionOf(inst)
         if inst:IsA("BasePart") then return inst.Position end
@@ -272,6 +273,7 @@ return function(parent, ctx)
                         seen[d] = true
                         for _, dd in ipairs(d:GetDescendants()) do seen[dd] = true end
                         nestOfEgg[d] = sp.area
+                        spotOfEgg[d] = sp.nest
                         found[#found + 1] = d
                     end
                 end
@@ -282,7 +284,7 @@ return function(parent, ctx)
                 if looksLikeEggModel(top) then
                     local pos = positionOf(top)
                     local sp = pos and spotAt(spots, pos)
-                    if sp then nestOfEgg[top] = sp.area; found[#found + 1] = top; seen[top] = true end
+                    if sp then nestOfEgg[top] = sp.area; spotOfEgg[top] = sp.nest; found[#found + 1] = top; seen[top] = true end
                 end
                 if not seen[top] then scan(top) end
             end
@@ -338,7 +340,28 @@ return function(parent, ctx)
             end
             if not nested then eggs[#eggs + 1] = inst end
         end
-        return eggs
+        -- One egg per nest: the slot copy (AreaEggSlotsClient) and the real egg model sit on the same nest.
+        -- Prefer the one that carries a name label (PreparedSourceName).
+        local function score(inst)
+            local sc = 0
+            if inst:GetAttribute("PreparedSourceName") then sc += 2 end
+            for _, d in ipairs(inst:GetDescendants()) do
+                if d:GetAttribute("PreparedSourceName") then sc += 1 break end
+            end
+            return sc
+        end
+        local bestByNest, out = {}, {}
+        for _, inst in ipairs(eggs) do
+            local nest = spotOfEgg[inst]
+            if nest then
+                local cur = bestByNest[nest]
+                if not cur or score(inst) > score(cur) then bestByNest[nest] = inst end
+            else
+                out[#out + 1] = inst
+            end
+        end
+        for _, inst in pairs(bestByNest) do out[#out + 1] = inst end
+        return out
     end
 
     ----------------------------------------------------------------
@@ -483,7 +506,24 @@ return function(parent, ctx)
             r = fromPath(d:GetAttribute("PreparedSourceName"))
             if r then return r end
         end
+        -- fallback: a child model / mesh with a real (non-generic, non-ID) name
+        local GENERIC = { hitbox = true, hitboxweld = true, part = true, model = true, meshpart = true, root = true,
+            handle = true, weld = true, attachment = true, primarypart = true, body = true, mesh = true, egg = true }
+        for _, d in ipairs(inst:GetDescendants()) do
+            if d:IsA("Model") or d:IsA("MeshPart") then
+                local n = d.Name
+                local low = string.lower(n)
+                if not GENERIC[low] and not string.match(n, "^%x+$") and not string.match(n, "^%d") then
+                    return fromPath(n)
+                end
+            end
+        end
         return nil
+    end
+    local function isIdName(name)
+        if string.match(name, "^%x+$") and #name >= 16 then return true end
+        local id = string.match(name, "^(%d+)_(%x+)$")
+        return id ~= nil
     end
     local function findContents(inst)
         local hn = hatchName(inst)
@@ -653,8 +693,8 @@ return function(parent, ctx)
             local kind, _, area = parseName(e.inst.Name)
             local title = prettyKind(kind)
             local rid, rguid = splitRenderName(e.inst.Name)
-            if rid then
-                title = e.contents or ("Egg " .. i)
+            if rid or isIdName(e.inst.Name) then
+                title = e.contents or "Unknown egg"
                 area = ""
             end
             for _, key in ipairs({ "EggName", "EggType", "DisplayName", "PetName" }) do
@@ -914,7 +954,7 @@ return function(parent, ctx)
     end
 
     local function deepDebug()
-        local lines = { "BananaHub DEEP debug v4 - GameId " .. tostring(game.GameId) }
+        local lines = { "BananaHub DEEP debug v5 - GameId " .. tostring(game.GameId) }
         local spots = nestSpots()
         lines[#lines + 1] = "Nest spots: " .. #spots
         for i, egg in ipairs(lastEggs) do
@@ -922,6 +962,24 @@ return function(parent, ctx)
             local at = {}
             for k, v in pairs(egg:GetAttributes()) do at[#at + 1] = k .. "=" .. tostring(v) end
             lines[#lines + 1] = "EGG" .. i .. " " .. egg:GetFullName() .. " | " .. table.concat(at, ", ")
+        end
+        -- full look inside the first egg that has no name label
+        for _, egg in ipairs(lastEggs) do
+            if egg:GetAttribute("PreparedSourceName") == nil then
+                lines[#lines + 1] = "NONAME " .. egg:GetFullName()
+                local n = 0
+                for _, d in ipairs(egg:GetDescendants()) do
+                    if n >= 25 then lines[#lines + 1] = "   ..." break end
+                    n += 1
+                    local extra = {}
+                    for k, v in pairs(d:GetAttributes()) do extra[#extra + 1] = k .. "=" .. tostring(v) end
+                    if d:IsA("MeshPart") then extra[#extra + 1] = "mesh=" .. tostring(d.MeshId) end
+                    if d:IsA("BasePart") then extra[#extra + 1] = "color=" .. tostring(d.BrickColor) end
+                    if d:IsA("ValueBase") then extra[#extra + 1] = "value=" .. tostring(d.Value) end
+                    lines[#lines + 1] = "   " .. d:GetFullName():sub(#egg:GetFullName() + 2) .. " (" .. d.ClassName .. ") " .. table.concat(extra, ", ")
+                end
+                break
+            end
         end
         -- What is standing near the nests? (any model, any folder)
         local near, shownNear = {}, 0

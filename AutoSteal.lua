@@ -54,7 +54,7 @@ return function(parent, ctx)
     local sortMode = 1
     local selectedEgg = nil
     local stealing = false
-    local autoReturn = true -- teleport back to where you were after stealing
+    local showStealLog -- set after the output box exists
 
     local status = Instance.new("TextLabel")
     status.Size = UDim2.new(1, -356, 0, 24)
@@ -1105,22 +1105,62 @@ return function(parent, ctx)
 
     -- Did we pick the egg up? (egg moved into our character, or follows us, or vanished from the nest)
     local function carrying(egg, char, startPos)
-        if not egg or not egg.Parent then return true end
-        if egg:IsDescendantOf(char) then return true end
+        if not egg or not egg.Parent then return true, "egg removed from nest" end
+        if egg:IsDescendantOf(char) then return true, "egg inside character" end
         for _, d in ipairs(char:GetDescendants()) do
-            if (d:IsA("Model") or d:IsA("BasePart")) and string.match(d.Name, "^%x+$") and #d.Name >= 32 then return true end
+            if (d:IsA("Model") or d:IsA("BasePart")) and string.match(d.Name, "^%x+$") and #d.Name >= 32 then return true, "guid model on character: " .. d.Name end
             if d:IsA("Weld") or d:IsA("WeldConstraint") or d:IsA("RigidConstraint") then
                 local other = d.Part1 or d.Part0
-                if other and other:IsDescendantOf(egg) then return true end
+                if other and other:IsDescendantOf(egg) then return true, "egg welded to character" end
             end
         end
+        -- egg moved away from the nest AND is close to us = we're holding it
         local p = positionOf(egg)
-        return p ~= nil and startPos ~= nil and (p - startPos).Magnitude > 4
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if p and startPos and hrp and (p - startPos).Magnitude > 4 and (p - hrp.Position).Magnitude < 8 then
+            return true, "egg follows character"
+        end
+        return false, nil
+    end
+
+    local lastStealLog = {}
+    local function fmtV(v) return v and string.format("(%.0f, %.0f, %.0f)", v.X, v.Y, v.Z) or "nil" end
+
+    -- go to a spot: instant teleport, and if the server pulls us back, glide there instead
+    local function goTo(hrp, target, log)
+        hrp.CFrame = CFrame.new(target)
+        pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
+        task.wait(0.6)
+        local off = (hrp.Position - target).Magnitude
+        log[#log + 1] = "TP to " .. fmtV(target) .. " -> 0.6s later " .. string.format("%.1f", off) .. " studs away"
+        if off < 8 then return true end
+        log[#log + 1] = "  pulled back by server (anti-teleport). Gliding there at 45 studs/s instead"
+        glide(hrp, target, 45)
+        task.wait(0.6)
+        off = (hrp.Position - target).Magnitude
+        log[#log + 1] = "  after glide: " .. string.format("%.1f", off) .. " studs away"
+        return off < 8
+    end
+
+    local function describePrompt(pp)
+        return string.format("%s | Action='%s' Object='%s' Hold=%.2f MaxDist=%.0f Enabled=%s",
+            pp:GetFullName(), tostring(pp.ActionText), tostring(pp.ObjectText),
+            pp.HoldDuration or 0, pp.MaxActivationDistance or 0, tostring(pp.Enabled))
     end
 
     stealEgg = function(egg)
         if stealing then return end
         stealing = true
+        local log = {}
+        lastStealLog = log
+        local logStart = #remoteLog
+        local trigConn
+        pcall(function()
+            trigConn = game:GetService("ProximityPromptService").PromptTriggered:Connect(function(pp)
+                log[#log + 1] = "  PromptTriggered fired: " .. pp:GetFullName()
+            end)
+        end)
+        local got, why = false, nil
         local ok, err = pcall(function()
             local char = player.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -1130,59 +1170,98 @@ return function(parent, ctx)
             local pos = positionOf(egg)
             if not pos then status.Text = "Can't find egg position" return end
             local home = hrp.Position -- stand at your base when you press Steal
-            status.Text = "Teleporting to egg..."
-            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 0))
-            task.wait(0.3)
+            log[#log + 1] = "Egg: " .. egg:GetFullName() .. " at " .. fmtV(pos)
+            log[#log + 1] = "Home (where you pressed Steal): " .. fmtV(home)
+            local c0, w0 = carrying(egg, char, pos)
+            if c0 then log[#log + 1] = "WARNING: carrying-check already true before stealing: " .. tostring(w0) end
+            -- nearby prompts
+            promptCacheAt = 0
+            local near = {}
+            for _, p in ipairs(allPrompts()) do
+                local pp_pos = promptPos(p)
+                if pp_pos and (pp_pos - pos).Magnitude < 25 then near[#near + 1] = { p, (pp_pos - pos).Magnitude } end
+            end
+            table.sort(near, function(a, b) return a[2] < b[2] end)
+            log[#log + 1] = "Prompts within 25 studs of egg: " .. #near
+            for i = 1, math.min(#near, 6) do
+                log[#log + 1] = string.format("  %.1f studs: ", near[i][2]) .. describePrompt(near[i][1])
+            end
+            status.Text = "Going to egg..."
+            if not goTo(hrp, pos + Vector3.new(0, 3, 0), log) then
+                status.Text = "Server keeps pulling me back - see log"
+                return
+            end
             promptCacheAt = 0
             local pp = promptFor(egg, 18)
-            if not pp then status.Text = "No steal prompt at this egg (press Deep)" return end
+            if not pp then status.Text = "No steal prompt at this egg - see log" log[#log + 1] = "No prompt found" return end
+            log[#log + 1] = "Using prompt: " .. describePrompt(pp)
             local ppPos = promptPos(pp) or pos
-            -- stand right next to the prompt, facing it
             local stand = ppPos + Vector3.new(0, 2.5, 0)
             hrp.CFrame = CFrame.new(stand + Vector3.new(2, 0, 0), stand)
-            task.wait(0.25)
+            task.wait(0.3)
+            log[#log + 1] = string.format("Standing %.1f studs from prompt", (hrp.Position - ppPos).Magnitude)
+            -- try 1: executor fire
             local fired, how = firePrompt(pp)
-            status.Text = fired and ("Picking up (" .. how .. ")...") or "Prompt failed"
-            -- wait until we are holding it (max 2.5 s)
-            local got = false
+            log[#log + 1] = "Try 1: " .. tostring(how) .. " ok=" .. tostring(fired)
+            status.Text = "Picking up..."
             local t0 = os.clock()
-            while os.clock() - t0 < 2.5 do
-                if carrying(egg, char, pos) then got = true break end
+            while os.clock() - t0 < 2 do
+                got, why = carrying(egg, char, pos)
+                if got then break end
                 task.wait(0.1)
             end
             if not got then
-                -- second try: real hold
-                pcall(function()
+                -- try 2: real hold for the full hold time
+                local hold = pp.HoldDuration or 0
+                local ok2, e2 = pcall(function()
                     pp:InputHoldBegin()
-                    task.wait((pp.HoldDuration or 0) + 0.2)
+                    task.wait(hold + 0.3)
                     pp:InputHoldEnd()
                 end)
-                task.wait(0.5)
-                got = carrying(egg, char, pos)
+                log[#log + 1] = "Try 2: InputHoldBegin " .. string.format("%.2f", hold + 0.3) .. "s ok=" .. tostring(ok2) .. (e2 and (" err=" .. tostring(e2)) or "")
+                local t1 = os.clock()
+                while os.clock() - t1 < 1.5 do
+                    got, why = carrying(egg, char, pos)
+                    if got then break end
+                    task.wait(0.1)
+                end
             end
-            status.Text = got and "Got it! Gliding back..." or "Not sure it picked up, gliding back anyway..."
-            -- glide back to just before your base, then walk the last bit to claim
+            log[#log + 1] = "Picked up: " .. tostring(got) .. (why and (" (" .. why .. ")") or "")
+            if not got then
+                status.Text = "Didn't pick it up - try pressing E yourself now, then tell me"
+                return -- stay here so you can test the prompt by hand
+            end
+            status.Text = "Got it! Gliding back..."
             local h2 = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
             local hum2 = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
             if not h2 or not hum2 then return end
             local flat = Vector3.new(home.X - h2.Position.X, 0, home.Z - h2.Position.Z)
             local dir = flat.Magnitude > 0.1 and flat.Unit or Vector3.new(1, 0, 0)
             local before = home - dir * WALK_LAST
-            -- go up a little first so we don't drag through the nest
             glide(h2, h2.Position + Vector3.new(0, 6, 0), TWEEN_SPEED)
             glide(h2, Vector3.new(before.X, home.Y + 6, before.Z), TWEEN_SPEED)
             glide(h2, Vector3.new(before.X, home.Y, before.Z), TWEEN_SPEED)
+            log[#log + 1] = "Glided back, now " .. string.format("%.1f", (h2.Position - before).Magnitude) .. " studs from target"
             status.Text = "Walking in to claim..."
             hum2:MoveTo(home)
             local done = false
             local c = hum2.MoveToFinished:Connect(function() done = true end)
-            local t1 = os.clock()
-            while not done and os.clock() - t1 < 4 do task.wait(0.1) end
+            local t2 = os.clock()
+            while not done and os.clock() - t2 < 4 do task.wait(0.1) end
             c:Disconnect()
-            status.Text = got and "Stolen - walked into base" or "Back at base (check if the egg came with you)"
+            log[#log + 1] = "Walked in, " .. string.format("%.1f", (h2.Position - home).Magnitude) .. " studs from home"
+            status.Text = "Stolen - walked into base"
         end)
+        if trigConn then trigConn:Disconnect() end
+        if not ok then status.Text = "Steal error: " .. tostring(err) log[#log + 1] = "ERROR: " .. tostring(err) end
+        log[#log + 1] = "Remote events during steal:"
+        local any = false
+        for i = math.max(logStart + 1, #remoteLog - 15), #remoteLog do
+            if remoteLog[i] then log[#log + 1] = "  " .. remoteLog[i] any = true end
+        end
+        if not any then log[#log + 1] = "  (none)" end
         stealing = false
-        if not ok then status.Text = "Steal error: " .. tostring(err) end
+        if not got and showStealLog then showStealLog() end
         task.delay(1, function() if alive then refresh() end end)
     end
 
@@ -1274,6 +1353,9 @@ return function(parent, ctx)
         outTitle.Text = title .. (copied and "  (copied)" or "  (copy failed - screenshot this)")
         overlay.Visible = true
         print(text)
+    end
+    showStealLog = function()
+        showOutput("Steal log v9 (screenshot this)", table.concat(lastStealLog, "\n"))
     end
 
     closeOut.Activated:Connect(function() overlay.Visible = false end)

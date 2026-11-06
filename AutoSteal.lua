@@ -252,6 +252,45 @@ return function(parent, ctx)
         return nil
     end
 
+    -- Best effort: what the egg will hatch into, if the game exposes it on the client.
+    local PET_KEYS = { "pet", "hatch", "contain", "inside", "reward", "content", "result", "animal", "creature" }
+    local SKIP_KEYS = { "owner", "player", "userid", "rarity", "tier" }
+    local function keyMatches(name)
+        local n = string.lower(name)
+        for _, k in ipairs(SKIP_KEYS) do
+            if string.find(n, k, 1, true) then return false end
+        end
+        for _, k in ipairs(PET_KEYS) do
+            if string.find(n, k, 1, true) then return true end
+        end
+        return false
+    end
+
+    local function findContents(inst)
+        local found = {}
+        local function add(v)
+            v = tostring(v)
+            if v ~= "" and v ~= "nil" and #found < 3 then
+                for _, f in ipairs(found) do if f == v then return end end
+                found[#found + 1] = v
+            end
+        end
+        for k, v in pairs(inst:GetAttributes()) do
+            if keyMatches(k) then add(v) end
+        end
+        for _, d in ipairs(inst:GetDescendants()) do
+            if d:IsA("ValueBase") and keyMatches(d.Name) then
+                add(d.Value)
+            elseif (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text ~= "" then
+                local label = string.lower(d.Name)
+                if keyMatches(d.Name) or string.find(label, "name", 1, true) then add(d.Text) end
+            end
+            if #found >= 3 then break end
+        end
+        if #found == 0 then return nil end
+        return table.concat(found, ", ")
+    end
+
     local function distanceTo(inst)
         local character = player.Character
         local hrp = character and character:FindFirstChild("HumanoidRootPart")
@@ -321,6 +360,7 @@ return function(parent, ctx)
                 dist = distanceTo(egg),
                 owner = findOwner(egg),
                 rarity = findRarity(egg),
+                contents = findContents(egg),
             }
         end
         table.sort(entries, function(a, b)
@@ -367,6 +407,7 @@ return function(parent, ctx)
             end
             if area ~= "" then title = title .. " (" .. area .. ")" end
             if e.rarity then title = title .. " [" .. e.rarity .. "]" end
+            if e.contents then title = title .. " -> " .. e.contents end
             name.Text = title
             name.TextColor3 = TEXT
             name.Font = Enum.Font.GothamMedium

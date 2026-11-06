@@ -99,8 +99,36 @@ return function(parent, ctx)
         return false
     end
 
+    -- Nest / spawn helper parts that contain "egg" in the name but are not eggs.
+    local JUNK = { "fitbounds", "spotbottom", "eggpoint", "holder", "eggspot", "bounds", "slot", "spawn" }
+    local function isJunk(inst)
+        local n = string.lower(inst.Name)
+        for _, j in ipairs(JUNK) do
+            if string.find(n, j, 1, true) then return true end
+        end
+        return false
+    end
+
     local function isEggLike(inst)
-        return (inst:IsA("Model") or inst:IsA("BasePart")) and hasEggInName(inst)
+        return (inst:IsA("Model") or inst:IsA("BasePart")) and hasEggInName(inst) and not isJunk(inst)
+    end
+
+    -- "FirstAreaEgg_5500179517_5979771_Forest" -> kind "FirstAreaEgg", numbers {...}, area "Forest"
+    local function parseName(name)
+        local parts = string.split(name, "_")
+        local kind = parts[1]
+        local nums, words = {}, {}
+        for i = 2, #parts do
+            if tonumber(parts[i]) then nums[#nums + 1] = tonumber(parts[i])
+            else words[#words + 1] = parts[i] end
+        end
+        return kind, nums, table.concat(words, " ")
+    end
+
+    local function prettyKind(kind)
+        -- "FirstAreaEgg" -> "First Area Egg"
+        local spaced = string.gsub(kind or "", "(%l)(%u)", "%1 %2")
+        return spaced
     end
 
     local function findEggs()
@@ -159,6 +187,11 @@ return function(parent, ctx)
     end
 
     local function findOwner(inst)
+        local _, nums = parseName(inst.Name)
+        for _, n in ipairs(nums) do
+            local p = Players:GetPlayerByUserId(n)
+            if p then return p.Name end
+        end
         local node = inst
         for _ = 1, 6 do
             if not node or node == workspace then break end
@@ -274,7 +307,7 @@ return function(parent, ctx)
             local empty = Instance.new("TextLabel")
             empty.Size = UDim2.new(1, 0, 0, 60)
             empty.BackgroundTransparency = 1
-            empty.Text = "Nothing in Workspace has \"egg\" in its name yet.\nPress Debug and send me the output."
+            empty.Text = "No real eggs found (nest parts are ignored).\nPress Debug and send me the output."
             empty.TextColor3 = MUTED
             empty.Font = Enum.Font.Gotham
             empty.TextSize = 12
@@ -301,7 +334,13 @@ return function(parent, ctx)
             name.Position = UDim2.new(0, 8, 0, 0)
             name.Size = UDim2.new(0.5, -8, 1, 0)
             name.BackgroundTransparency = 1
-            local title = e.inst.Name
+            local kind, _, area = parseName(e.inst.Name)
+            local title = prettyKind(kind)
+            for _, key in ipairs({ "EggName", "EggType", "DisplayName", "PetName" }) do
+                local v = e.inst:GetAttribute(key)
+                if v ~= nil then title = tostring(v) break end
+            end
+            if area ~= "" then title = title .. " (" .. area .. ")" end
             if e.rarity then title = title .. " [" .. e.rarity .. "]" end
             name.Text = title
             name.TextColor3 = TEXT
@@ -361,11 +400,31 @@ return function(parent, ctx)
     connect(debugButton, function()
         local lines = { "BananaHub debug - GameId " .. tostring(game.GameId) .. ", PlaceId " .. tostring(game.PlaceId) }
         lines[#lines + 1] = "Eggs found: " .. #lastEggs
-        for _, egg in ipairs(lastEggs) do
+        for i, egg in ipairs(lastEggs) do
             lines[#lines + 1] = "  " .. egg:GetFullName() .. " (" .. egg.ClassName .. ")"
-            for k, v in pairs(egg:GetAttributes()) do
-                lines[#lines + 1] = "    attr " .. k .. " = " .. tostring(v)
+            if i <= 12 then
+                for k, v in pairs(egg:GetAttributes()) do
+                    lines[#lines + 1] = "    attr " .. k .. " = " .. tostring(v)
+                end
+                for _, d in ipairs(egg:GetDescendants()) do
+                    if d:IsA("ValueBase") then
+                        lines[#lines + 1] = "    value " .. d.Name .. " = " .. tostring(d.Value)
+                    elseif d:IsA("TextLabel") or d:IsA("TextButton") then
+                        lines[#lines + 1] = "    text " .. d.Name .. " = " .. d.Text
+                    elseif d:IsA("ProximityPrompt") then
+                        lines[#lines + 1] = "    prompt " .. d.Name .. " action=" .. d.ActionText .. " object=" .. d.ObjectText
+                    elseif d:IsA("ClickDetector") then
+                        lines[#lines + 1] = "    clickdetector " .. d.Name
+                    end
+                end
+                local names = {}
+                for _, c in ipairs(egg:GetChildren()) do names[#names + 1] = c.Name .. ":" .. c.ClassName end
+                lines[#lines + 1] = "    children " .. table.concat(names, ", ")
             end
+        end
+        lines[#lines + 1] = "Players: " .. #Players:GetPlayers()
+        for _, p in ipairs(Players:GetPlayers()) do
+            lines[#lines + 1] = "  " .. p.Name .. " userId " .. p.UserId
         end
         lines[#lines + 1] = "Workspace children:"
         for _, child in ipairs(workspace:GetChildren()) do

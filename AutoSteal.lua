@@ -49,9 +49,12 @@ return function(parent, ctx)
     local espButton = makeButton("ESP: On", 64, 70)
     local debugButton = makeButton("Debug", 54, 140)
     local deepButton = makeButton("Deep", 48, 200)
+    local sortButton = makeButton("Sort: Near", 78, 254)
+    local SORT_MODES = { "Near", "Far", "Name", "Area" }
+    local sortMode = 1
 
     local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -255, 0, 24)
+    status.Size = UDim2.new(1, -338, 0, 24)
     status.BackgroundTransparency = 1
     status.Text = "Scanning..."
     status.TextColor3 = TEXT
@@ -491,6 +494,25 @@ return function(parent, ctx)
     end
 
     local meshName
+    -- names Blender / the importer gives parts: Cube.003, Plane.002, untitled.054, Meshes/..._0011.004
+    local JUNK = { hitbox = true, hitboxweld = true, part = true, model = true, meshpart = true, root = true,
+        handle = true, weld = true, attachment = true, primarypart = true, body = true, mesh = true, egg = true,
+        eggs = true, assets = true, meshes = true, models = true, cube = true, plane = true, sphere = true,
+        cylinder = true, circle = true, icosphere = true, torus = true, cone = true, base = true, top = true,
+        bottom = true, shell = true, folder = true, slot = true, slots = true }
+    local function isJunkName(n)
+        if type(n) ~= "string" or n == "" then return true end
+        local low = string.lower(n)
+        local stem = string.gsub(low, "[%._%s]*%d+$", "")   -- "cube.003" -> "cube"
+        stem = string.gsub(stem, "%.%d+$", "")
+        if JUNK[low] or JUNK[stem] then return true end
+        if string.find(low, "/", 1, true) or string.find(low, "untitled", 1, true) or string.find(low, "union", 1, true)
+            or string.find(low, "boundingbox", 1, true) or string.find(low, "weld", 1, true) then return true end
+        if string.match(n, "^%x+$") and #n >= 8 then return true end
+        if string.match(n, "^[%d%.%s_]+$") then return true end
+        if not string.match(n, "%a%a") then return true end
+        return false
+    end
     -- MeshId -> template name, built once from ReplicatedStorage / named egg folders
     local meshIndex
     local function buildMeshIndex()
@@ -508,9 +530,7 @@ return function(parent, ctx)
                     local a = d.Parent
                     while a and a ~= root do
                         local n = a.Name
-                        local low = string.lower(n)
-                        if a:IsA("Model") and not string.match(low, "^untitled") and not string.match(n, "^%x+$")
-                            and low ~= "model" and low ~= "egg" and low ~= "eggs" and low ~= "assets" then
+                        if (a:IsA("Model") or a:IsA("Folder")) and not isJunkName(n) then
                             meshIndex[d.MeshId] = n
                             break
                         end
@@ -537,6 +557,7 @@ return function(parent, ctx)
             last = string.gsub(last, "_", " ")
             last = string.gsub(last, "(%l)(%u)", "%1 %2")
             last = string.gsub(last, "(%a)(%d)", "%1 %2")
+            if not string.match(last, "%a%a") then return nil end
             return last
         end
         local r = fromPath(inst:GetAttribute("PreparedSourceName"))
@@ -545,22 +566,15 @@ return function(parent, ctx)
             r = fromPath(d:GetAttribute("PreparedSourceName"))
             if r then return r end
         end
-        -- fallback: a child model / mesh with a real (non-generic, non-ID) name
-        local GENERIC = { hitbox = true, hitboxweld = true, part = true, model = true, meshpart = true, root = true,
-            handle = true, weld = true, attachment = true, primarypart = true, body = true, mesh = true, egg = true }
-        for _, d in ipairs(inst:GetDescendants()) do
-            if d:IsA("Model") or d:IsA("MeshPart") then
-                local n = d.Name
-                local low = string.lower(n)
-                if not GENERIC[low] and not string.match(low, "^untitled") and not string.match(low, "union")
-                    and not string.match(n, "^%x+$") and not string.match(n, "^%d") then
-                    return fromPath(n)
-                end
-            end
-        end
-        -- last try: match the egg's mesh against named egg templates in the game
+        -- match the egg's mesh against named egg templates in the game
         local named = meshName(inst)
         if named then return fromPath(named) end
+        -- fallback: a child model / mesh with a real name (never Cube.003 / Plane / 001)
+        for _, d in ipairs(inst:GetDescendants()) do
+            if (d:IsA("Model") or d:IsA("MeshPart")) and not isJunkName(d.Name) then
+                return fromPath(d.Name)
+            end
+        end
         return nil
     end
     local function isIdName(name)
@@ -697,8 +711,18 @@ return function(parent, ctx)
                 contents = findContents(egg),
             }
         end
+        for _, e in ipairs(entries) do
+            local _, _, ar = parseName(e.inst.Name)
+            e.sortName = string.lower(e.contents or "zzz")
+            e.sortArea = string.lower(nestOfEgg[e.inst] or ar or "zzz")
+        end
+        local mode = SORT_MODES[sortMode]
         table.sort(entries, function(a, b)
-            return (a.dist or math.huge) < (b.dist or math.huge)
+            local da, db = a.dist or math.huge, b.dist or math.huge
+            if mode == "Far" then return da > db end
+            if mode == "Name" and a.sortName ~= b.sortName then return a.sortName < b.sortName end
+            if mode == "Area" and a.sortArea ~= b.sortArea then return a.sortArea < b.sortArea end
+            return da < db
         end)
 
         if #entries == 0 then
@@ -776,6 +800,12 @@ return function(parent, ctx)
 
         list.CanvasPosition = savedScroll
     end
+
+    sortButton.MouseButton1Click:Connect(function()
+        sortMode = sortMode % #SORT_MODES + 1
+        sortButton.Text = "Sort: " .. SORT_MODES[sortMode]
+        if lastEggs and #lastEggs > 0 then render(lastEggs) end
+    end)
 
     local function refresh()
         if not alive then return end
@@ -997,7 +1027,7 @@ return function(parent, ctx)
     end
 
     local function deepDebug()
-        local lines = { "BananaHub DEEP debug v5 - GameId " .. tostring(game.GameId) }
+        local lines = { "BananaHub DEEP debug v6 - GameId " .. tostring(game.GameId) }
         local spots = nestSpots()
         lines[#lines + 1] = "Nest spots: " .. #spots
         for i, egg in ipairs(lastEggs) do

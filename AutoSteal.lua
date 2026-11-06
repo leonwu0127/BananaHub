@@ -48,9 +48,10 @@ return function(parent, ctx)
     local refreshButton = makeButton("Refresh", 64, 0)
     local espButton = makeButton("ESP: On", 64, 70)
     local debugButton = makeButton("Debug", 54, 140)
+    local deepButton = makeButton("Deep", 48, 200)
 
     local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -200, 0, 24)
+    status.Size = UDim2.new(1, -255, 0, 24)
     status.BackgroundTransparency = 1
     status.Text = "Scanning..."
     status.TextColor3 = TEXT
@@ -86,8 +87,8 @@ return function(parent, ctx)
     local function isEggContainer(inst)
         -- A folder/model literally called "Egg" / "Eggs" holds the eggs as children.
         local n = string.lower(inst.Name)
-        return (inst:IsA("Folder") or inst:IsA("Model")) and (n == "eggs" or n == "egg")
-            and not inst:IsA("BasePart")
+        return (inst:IsA("Folder") or inst:IsA("Model")) and (n == "eggs" or n == "placedeggrenders")
+            and inst.Parent == workspace
     end
 
     local function isPlayerStuff(inst)
@@ -110,7 +111,7 @@ return function(parent, ctx)
     end
 
     -- Decoration / machine / nest containers whose "egg" parts are never real eggs.
-    local BAD_ANCESTORS = { "machines", "areaeggslotsclient", "__clienttreadmillrenders", "treadmills" }
+    local BAD_ANCESTORS = { "machines", "areaeggslotsclient", "__clienttreadmillrenders", "treadmills", "halloweeneggholders" }
     local function inBadPlace(inst)
         local a = inst
         while a and a ~= workspace do
@@ -525,6 +526,85 @@ return function(parent, ctx)
         end
         status.Text = copied and "Debug copied to clipboard (also in console)" or "Debug printed to console"
     end)
+
+
+    ----------------------------------------------------------------
+    -- Deep debug: inspect the places where real eggs probably live
+    ----------------------------------------------------------------
+    local function describe(inst, lines, indent)
+        local pre = string.rep(" ", indent)
+        lines[#lines + 1] = pre .. inst.Name .. " (" .. inst.ClassName .. ")"
+        local n = 0
+        for k, v in pairs(inst:GetAttributes()) do
+            if n < 12 then lines[#lines + 1] = pre .. "  attr " .. k .. " = " .. tostring(v) end
+            n += 1
+        end
+        local cnt = 0
+        for _, d in ipairs(inst:GetDescendants()) do
+            if cnt >= 14 then lines[#lines + 1] = pre .. "  ..." break end
+            if d:IsA("ValueBase") then
+                lines[#lines + 1] = pre .. "  value " .. d:GetFullName():sub(#inst:GetFullName() + 2) .. " = " .. tostring(d.Value); cnt += 1
+            elseif d:IsA("TextLabel") or d:IsA("TextButton") then
+                if d.Text ~= "" then lines[#lines + 1] = pre .. "  text " .. d.Name .. " = " .. d.Text; cnt += 1 end
+            elseif d:IsA("ProximityPrompt") then
+                lines[#lines + 1] = pre .. "  prompt " .. d.ActionText .. " / " .. d.ObjectText; cnt += 1
+            elseif d:IsA("ClickDetector") then
+                lines[#lines + 1] = pre .. "  clickdetector"; cnt += 1
+            end
+        end
+        local names = {}
+        for i, c in ipairs(inst:GetChildren()) do
+            if i > 12 then names[#names + 1] = "..." break end
+            names[#names + 1] = c.Name .. ":" .. c.ClassName
+        end
+        lines[#lines + 1] = pre .. "  children(" .. #inst:GetChildren() .. ") " .. table.concat(names, ", ")
+    end
+
+    local function deepDebug()
+        local lines = { "BananaHub DEEP debug - GameId " .. tostring(game.GameId) }
+        for _, folderName in ipairs({ "Eggs", "PlacedEggRenders", "ClientRenderedAssets", "Plots", "Stands", "ClientMountedPets" }) do
+            local f = workspace:FindFirstChild(folderName)
+            lines[#lines + 1] = "== Workspace." .. folderName .. (f and (" (" .. #f:GetChildren() .. " children)") or " MISSING")
+            if f then
+                for i, c in ipairs(f:GetChildren()) do
+                    if i > 3 then break end
+                    describe(c, lines, 2)
+                end
+            end
+        end
+        -- SmartPromptPart samples (57 egg-named ones exist)
+        local spp = workspace:FindFirstChild("SmartPromptPart")
+        lines[#lines + 1] = "== SmartPromptPart samples"
+        local shown = 0
+        for _, c in ipairs(workspace:GetChildren()) do
+            if c.Name == "SmartPromptPart" and shown < 2 then
+                shown += 1
+                describe(c, lines, 2)
+            end
+        end
+        -- ReplicatedStorage: names that look like egg / pet data
+        local RS = game:GetService("ReplicatedStorage")
+        lines[#lines + 1] = "== ReplicatedStorage top-level: "
+        local top = {}
+        for _, c in ipairs(RS:GetChildren()) do top[#top + 1] = c.Name .. ":" .. c.ClassName end
+        lines[#lines + 1] = "  " .. table.concat(top, ", ")
+        local hits = 0
+        lines[#lines + 1] = "== ReplicatedStorage egg/pet-ish names (max 30)"
+        for _, d in ipairs(RS:GetDescendants()) do
+            local n = string.lower(d.Name)
+            if (string.find(n, "egg", 1, true) or string.find(n, "pet", 1, true) or string.find(n, "hatch", 1, true)) and hits < 30 then
+                hits += 1
+                lines[#lines + 1] = "  " .. d:GetFullName():gsub("^ReplicatedStorage%.", "") .. " (" .. d.ClassName .. ")"
+            end
+        end
+        local text = table.concat(lines, "\n")
+        print(text)
+        local copied = false
+        if setclipboard then copied = pcall(setclipboard, text) end
+        status.Text = copied and "Deep debug copied to clipboard" or "Deep debug printed to console"
+    end
+
+    connect(deepButton, deepDebug)
 
     ----------------------------------------------------------------
     -- Live refresh while the view is open

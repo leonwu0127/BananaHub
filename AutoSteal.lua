@@ -50,6 +50,13 @@ return function(parent, ctx)
     local debugButton = makeButton("Debug", 54, 140)
     local deepButton = makeButton("Deep", 48, 200)
     local sortButton = makeButton("Sort: Near", 96, 254)
+    local speedButton = makeButton("Back: Safe", 80, 356)
+    local SPEED_MODES = { "Safe", "Fast", "Walk" }
+    local speedMode = 1
+    speedButton.MouseButton1Click:Connect(function()
+        speedMode = speedMode % #SPEED_MODES + 1
+        speedButton.Text = "Back: " .. SPEED_MODES[speedMode]
+    end)
     local SORT_MODES = { "Near", "Far", "Most $/s", "Most Rare" }
     local sortMode = 1
     local selectedEgg = nil
@@ -57,7 +64,7 @@ return function(parent, ctx)
     local showStealLog -- set after the output box exists
 
     local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -356, 0, 24)
+    status.Size = UDim2.new(1, -442, 0, 24)
     status.BackgroundTransparency = 1
     status.Text = "Scanning..."
     status.TextColor3 = TEXT
@@ -1083,8 +1090,75 @@ return function(parent, ctx)
 
     -- Fast glide (sets the root CFrame every frame, so walls / falling don't stop it)
     local RunService = game:GetService("RunService")
-    local TWEEN_SPEED = 110   -- studs per second on the way back
+    local TWEEN_SPEED = 110   -- studs per second on the way back (Fast mode)
+    local SAFE_SPEED = 32     -- Safe mode: close to a sprint, less likely to trip speed checks
     local WALK_LAST = 14      -- walk this many studs at the end to claim
+    local function groundY(char, p)
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = { char }
+        pcall(function() rp.RespectCanCollide = true end)
+        local hit = workspace:Raycast(p + Vector3.new(0, 25, 0), Vector3.new(0, -80, 0), rp)
+        return hit and hit.Position.Y or nil
+    end
+    -- glide that stays on the ground (no flying, no going through the floor)
+    local function groundGlide(hrp, target, speed, log)
+        local char = hrp.Parent
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        local hip = (hum and hum.HipHeight or 2) + hrp.Size.Y / 2
+        local from = hrp.Position
+        local flatFrom = Vector3.new(from.X, 0, from.Z)
+        local flatTo = Vector3.new(target.X, 0, target.Z)
+        local dist = (flatTo - flatFrom).Magnitude
+        if dist < 0.5 then return end
+        local t, total, lastY = 0, dist / speed, from.Y
+        local nextLog = 1
+        while t < total and alive and hrp.Parent do
+            if hum and hum.Health <= 0 then return end
+            t = t + RunService.Heartbeat:Wait()
+            local a = math.min(t / total, 1)
+            local f = flatFrom:Lerp(flatTo, a)
+            local gy = groundY(char, Vector3.new(f.X, lastY, f.Z))
+            local y = gy and (gy + hip) or lastY
+            lastY = y
+            local p = Vector3.new(f.X, y, f.Z)
+            local look = Vector3.new(target.X, y, target.Z)
+            if (look - p).Magnitude > 0.1 then hrp.CFrame = CFrame.lookAt(p, look) else hrp.CFrame = CFrame.new(p) end
+            pcall(function()
+                hrp.AssemblyLinearVelocity = (flatTo - flatFrom).Unit * speed
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+            if log and t >= nextLog then
+                nextLog = nextLog + 1
+                log[#log + 1] = string.format("  t=%.0fs at %s, %.0f%% of the way", t, string.format("(%.0f, %.0f, %.0f)", p.X, p.Y, p.Z), a * 100)
+            end
+        end
+    end
+    -- walk back with pathfinding (slowest, most "legit")
+    local function walkBack(hum, hrp, target, log)
+        local ok, path = pcall(function()
+            local p = game:GetService("PathfindingService"):CreatePath({ AgentCanJump = true })
+            p:ComputeAsync(hrp.Position, target)
+            return p
+        end)
+        local wps = (ok and path and path.Status == Enum.PathStatus.Success) and path:GetWaypoints() or nil
+        if not wps then
+            if log then log[#log + 1] = "  no path found, walking straight" end
+            wps = { { Position = target, Action = Enum.PathWaypointAction.Walk } }
+        elseif log then
+            log[#log + 1] = "  path has " .. #wps .. " waypoints"
+        end
+        for _, wp in ipairs(wps) do
+            if not alive or hum.Health <= 0 then return end
+            if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+            hum:MoveTo(wp.Position)
+            local done = false
+            local c = hum.MoveToFinished:Connect(function() done = true end)
+            local t0 = os.clock()
+            while not done and os.clock() - t0 < 3 and hum.Health > 0 do task.wait(0.05) end
+            c:Disconnect()
+        end
+    end
     local function glide(hrp, target, speed)
         local from = hrp.Position
         local dist = (target - from).Magnitude
@@ -1238,10 +1312,43 @@ return function(parent, ctx)
             local flat = Vector3.new(home.X - h2.Position.X, 0, home.Z - h2.Position.Z)
             local dir = flat.Magnitude > 0.1 and flat.Unit or Vector3.new(1, 0, 0)
             local before = home - dir * WALK_LAST
-            glide(h2, h2.Position + Vector3.new(0, 6, 0), TWEEN_SPEED)
-            glide(h2, Vector3.new(before.X, home.Y + 6, before.Z), TWEEN_SPEED)
-            glide(h2, Vector3.new(before.X, home.Y, before.Z), TWEEN_SPEED)
-            log[#log + 1] = "Glided back, now " .. string.format("%.1f", (h2.Position - before).Magnitude) .. " studs from target"
+            -- watch for death / damage on the way back
+            local backStart = os.clock()
+            local deathConns = {}
+            deathConns[#deathConns + 1] = hum2.Died:Connect(function()
+                log[#log + 1] = string.format("!! DIED %.1fs into the return at %s (%.0f studs from base)", os.clock() - backStart, fmtV(h2.Position), (h2.Position - home).Magnitude)
+            end)
+            local lastHp = hum2.Health
+            deathConns[#deathConns + 1] = hum2.HealthChanged:Connect(function(hp)
+                if hp < lastHp then
+                    log[#log + 1] = string.format("  damage: %.0f -> %.0f at %s (%.1fs)", lastHp, hp, fmtV(h2.Position), os.clock() - backStart)
+                end
+                lastHp = hp
+            end)
+            deathConns[#deathConns + 1] = hum2.StateChanged:Connect(function(_, new)
+                if new == Enum.HumanoidStateType.Dead or new == Enum.HumanoidStateType.FallingDown or new == Enum.HumanoidStateType.Ragdoll or new == Enum.HumanoidStateType.Physics then
+                    log[#log + 1] = "  state -> " .. tostring(new) .. string.format(" at %.1fs", os.clock() - backStart)
+                end
+            end)
+            local mode = SPEED_MODES[speedMode]
+            log[#log + 1] = "Return mode: " .. mode .. string.format(" (%.0f studs to go)", (h2.Position - before).Magnitude)
+            if mode == "Walk" then
+                status.Text = "Got it! Walking back..."
+                walkBack(hum2, h2, before, log)
+            elseif mode == "Fast" then
+                glide(h2, h2.Position + Vector3.new(0, 6, 0), TWEEN_SPEED)
+                glide(h2, Vector3.new(before.X, home.Y + 6, before.Z), TWEEN_SPEED)
+                glide(h2, Vector3.new(before.X, home.Y, before.Z), TWEEN_SPEED)
+            else
+                groundGlide(h2, before, SAFE_SPEED, log)
+            end
+            for _, cn in ipairs(deathConns) do cn:Disconnect() end
+            if hum2.Health <= 0 then
+                status.Text = "Died on the way back - see steal log"
+                got = false
+                return
+            end
+            log[#log + 1] = "Back, now " .. string.format("%.1f", (h2.Position - before).Magnitude) .. " studs from target"
             status.Text = "Walking in to claim..."
             hum2:MoveTo(home)
             local done = false
@@ -1261,7 +1368,7 @@ return function(parent, ctx)
         end
         if not any then log[#log + 1] = "  (none)" end
         stealing = false
-        if not got and showStealLog then showStealLog() end
+        if (not got or not ok) and showStealLog then showStealLog() end
         task.delay(1, function() if alive then refresh() end end)
     end
 
@@ -1355,7 +1462,7 @@ return function(parent, ctx)
         print(text)
     end
     showStealLog = function()
-        showOutput("Steal log v9 (screenshot this)", table.concat(lastStealLog, "\n"))
+        showOutput("Steal log v10 (screenshot this)", table.concat(lastStealLog, "\n"))
     end
 
     closeOut.Activated:Connect(function() overlay.Visible = false end)

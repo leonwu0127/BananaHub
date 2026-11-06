@@ -52,7 +52,7 @@ local gameName = supportedGames[game.GameId] or "Unsupported Game"
 
 -- Remove old copies from every possible location.
 for _, container in ipairs({ guiParent, playerGui }) do
-    for _, name in ipairs({ "EggHub", "BananaHub" }) do
+    for _, name in ipairs({ "EggHub", "BananaHub", "BananaHubEgg" }) do
         local existing = container:FindFirstChild(name)
         if existing then
             existing:Destroy()
@@ -148,6 +148,186 @@ local handleCorner = Instance.new("UICorner")
 handleCorner.CornerRadius = UDim.new(1, 0)
 handleCorner.Parent = handle
 
+----------------------------------------------------------------
+-- Expanded content: feature menu + feature views
+----------------------------------------------------------------
+local RAW_BASE = "https://raw.githubusercontent.com/leonwu0127/BananaHub/main/"
+local TEXT_COLOR = Color3.fromRGB(250, 228, 160)
+local MUTED_COLOR = Color3.fromRGB(170, 165, 140)
+local BUTTON_COLOR = Color3.fromRGB(36, 39, 48)
+
+local content = Instance.new("Frame")
+content.Name = "Content"
+content.Position = UDim2.new(0, 12, 0, 12)
+content.Size = UDim2.new(1, -24, 1, -48)
+content.BackgroundTransparency = 1
+content.Visible = false
+content.ZIndex = 2
+content.Parent = panel
+
+local menuView = Instance.new("Frame")
+menuView.Name = "Menu"
+menuView.Size = UDim2.fromScale(1, 1)
+menuView.BackgroundTransparency = 1
+menuView.Parent = content
+
+local menuLayout = Instance.new("UIListLayout")
+menuLayout.Padding = UDim.new(0, 6)
+menuLayout.SortOrder = Enum.SortOrder.LayoutOrder
+menuLayout.Parent = menuView
+
+local featureView = Instance.new("Frame")
+featureView.Name = "Feature"
+featureView.Size = UDim2.fromScale(1, 1)
+featureView.BackgroundTransparency = 1
+featureView.Visible = false
+featureView.Parent = content
+
+local backButton = Instance.new("TextButton")
+backButton.Size = UDim2.fromOffset(60, 24)
+backButton.BackgroundColor3 = BUTTON_COLOR
+backButton.Text = "< Back"
+backButton.TextColor3 = TEXT_COLOR
+backButton.Font = Enum.Font.GothamMedium
+backButton.TextSize = 12
+backButton.Parent = featureView
+Instance.new("UICorner", backButton).CornerRadius = UDim.new(0, 6)
+
+local featureTitle = Instance.new("TextLabel")
+featureTitle.Position = UDim2.new(0, 68, 0, 0)
+featureTitle.Size = UDim2.new(1, -68, 0, 24)
+featureTitle.BackgroundTransparency = 1
+featureTitle.TextColor3 = TEXT_COLOR
+featureTitle.Font = Enum.Font.GothamBold
+featureTitle.TextSize = 14
+featureTitle.TextXAlignment = Enum.TextXAlignment.Left
+featureTitle.Text = ""
+featureTitle.Parent = featureView
+
+local featureHost = Instance.new("Frame")
+featureHost.Position = UDim2.new(0, 0, 0, 30)
+featureHost.Size = UDim2.new(1, 0, 1, -30)
+featureHost.BackgroundTransparency = 1
+featureHost.Parent = featureView
+
+local activeFeature = nil
+
+local function showMenu()
+    if activeFeature then
+        pcall(function() activeFeature.Destroy() end)
+        activeFeature = nil
+    end
+    featureHost:ClearAllChildren()
+    featureView.Visible = false
+    menuView.Visible = true
+end
+
+local function showMessage(text)
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.new(1, 0, 0, 60)
+    label.BackgroundTransparency = 1
+    label.Text = text
+    label.TextColor3 = MUTED_COLOR
+    label.Font = Enum.Font.Gotham
+    label.TextSize = 12
+    label.TextWrapped = true
+    label.Parent = featureHost
+    return label
+end
+
+-- Downloads a feature file from GitHub and shows it inside the panel.
+local function openFeature(title, fileName)
+    showMenu()
+    menuView.Visible = false
+    featureView.Visible = true
+    featureTitle.Text = title
+    local loading = showMessage("Loading " .. title .. "...")
+
+    task.spawn(function()
+        local ok, result = pcall(function()
+            local source = game:HttpGet(RAW_BASE .. fileName)
+            local chunk, compileError = loadstring(source)
+            if not chunk then
+                error(compileError, 0)
+            end
+            return chunk()
+        end)
+
+        if not featureView.Visible or featureTitle.Text ~= title then
+            return -- user went back or closed the panel while loading
+        end
+
+        loading:Destroy()
+        if not ok or type(result) ~= "function" then
+            showMessage("Could not load " .. fileName .. ":\n" .. tostring(result))
+            return
+        end
+
+        local started, feature = pcall(result, featureHost, {
+            guiParent = guiParent,
+            gameName = gameName,
+        })
+        if started and type(feature) == "table" then
+            activeFeature = feature
+        else
+            featureHost:ClearAllChildren()
+            showMessage("Error in " .. title .. ":\n" .. tostring(feature))
+        end
+    end)
+end
+
+local function addMenuButton(order, title, subtitle, callback)
+    local button = Instance.new("TextButton")
+    button.LayoutOrder = order
+    button.Size = UDim2.new(1, 0, 0, 38)
+    button.BackgroundColor3 = BUTTON_COLOR
+    button.AutoButtonColor = true
+    button.Text = ""
+    button.Parent = menuView
+    Instance.new("UICorner", button).CornerRadius = UDim.new(0, 8)
+
+    local name = Instance.new("TextLabel")
+    name.Position = UDim2.new(0, 12, 0, 3)
+    name.Size = UDim2.new(1, -24, 0, 18)
+    name.BackgroundTransparency = 1
+    name.Text = title
+    name.TextColor3 = TEXT_COLOR
+    name.Font = Enum.Font.GothamBold
+    name.TextSize = 14
+    name.TextXAlignment = Enum.TextXAlignment.Left
+    name.Parent = button
+
+    local sub = Instance.new("TextLabel")
+    sub.Position = UDim2.new(0, 12, 0, 21)
+    sub.Size = UDim2.new(1, -24, 0, 14)
+    sub.BackgroundTransparency = 1
+    sub.Text = subtitle
+    sub.TextColor3 = MUTED_COLOR
+    sub.Font = Enum.Font.Gotham
+    sub.TextSize = 11
+    sub.TextXAlignment = Enum.TextXAlignment.Left
+    sub.Parent = button
+
+    button.Activated:Connect(callback)
+end
+
+if game.GameId == 10563114921 then
+    addMenuButton(1, "Auto Steal", "See every egg in the server", function()
+        openFeature("Auto Steal", "AutoSteal.lua")
+    end)
+else
+    local none = Instance.new("TextLabel")
+    none.Size = UDim2.new(1, 0, 0, 40)
+    none.BackgroundTransparency = 1
+    none.Text = "No features for " .. gameName .. " yet."
+    none.TextColor3 = MUTED_COLOR
+    none.Font = Enum.Font.Gotham
+    none.TextSize = 12
+    none.Parent = menuView
+end
+
+backButton.Activated:Connect(showMenu)
+
 local expanded = false
 local busy = false
 local hovered = false
@@ -204,6 +384,7 @@ local function expand()
         if not gui.Parent then return end
         openButton.Visible = false
         collapseButton.Visible = true
+        content.Visible = true
         busy = false
     end)
 end
@@ -217,6 +398,8 @@ local function collapse()
     expanded = false
 
     collapseButton.Visible = false
+    content.Visible = false
+    showMenu()
     openButton.Visible = true
     openButton.TextTransparency = 1
 
@@ -258,6 +441,9 @@ collapseButton.MouseLeave:Connect(function()
 end)
 
 gui.Destroying:Connect(function()
+    if activeFeature then
+        pcall(function() activeFeature.Destroy() end)
+    end
     for _, tween in pairs(activeTweens) do
         tween:Cancel()
     end

@@ -9,7 +9,7 @@ return function(parent, ctx)
     local alive = true
     local espEnabled = true
     local highlights = {} -- [Instance] = Highlight
-    local MAX_HIGHLIGHTS = 30
+    local MAX_HIGHLIGHTS = 28 -- Roblox only draws ~31 Highlights at once; the rest get a box outline
     local REFRESH_SECONDS = 3
 
     local TEXT = Color3.fromRGB(250, 228, 160)
@@ -524,10 +524,32 @@ return function(parent, ctx)
         local keep = {}
         local count = 0
         if espEnabled then
-            for _, egg in ipairs(eggs) do
-                if count >= MAX_HIGHLIGHTS then break end
+            local sorted = table.clone(eggs)
+            table.sort(sorted, function(a, b)
+                return (distanceTo(a) or math.huge) < (distanceTo(b) or math.huge)
+            end)
+            for _, egg in ipairs(sorted) do
                 keep[egg] = true
                 count += 1
+                local wantBox = count > MAX_HIGHLIGHTS
+                local h = highlights[egg]
+                if h and (h:IsA("SelectionBox") ~= wantBox) then
+                    clearHighlight(egg)
+                end
+                if wantBox and not highlights[egg] then
+                    local b = Instance.new("SelectionBox")
+                    b.Name = "BananaHubEggBox"
+                    b.Adornee = egg
+                    b.Color3 = GOLD
+                    b.LineThickness = 0.08
+                    b.SurfaceColor3 = GOLD
+                    b.SurfaceTransparency = 0.8
+                    local ok = pcall(function() b.Parent = ctx.guiParent end)
+                    if not ok or not b.Parent then
+                        pcall(function() b.Parent = egg end)
+                    end
+                    highlights[egg] = b
+                end
                 if not highlights[egg] then
                     local h = Instance.new("Highlight")
                     h.Name = "BananaHubEgg"

@@ -315,16 +315,12 @@ if game.GameId == 10563114921 then
     addMenuButton(1, "Auto Steal", "See every egg in the server", function()
         openFeature("Auto Steal", "AutoSteal.lua")
     end)
-else
-    local none = Instance.new("TextLabel")
-    none.Size = UDim2.new(1, 0, 0, 40)
-    none.BackgroundTransparency = 1
-    none.Text = "No features for " .. gameName .. " yet."
-    none.TextColor3 = MUTED_COLOR
-    none.Font = Enum.Font.Gotham
-    none.TextSize = 12
-    none.Parent = menuView
 end
+
+-- Works in every game
+addMenuButton(50, "Click TP", "Any game: press a key to teleport to your mouse", function()
+    openFeature("Click TP", "ClickTP.lua")
+end)
 
 backButton.Activated:Connect(showMenu)
 

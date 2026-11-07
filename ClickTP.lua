@@ -6,9 +6,10 @@
 return function(parent, ctx)
     local Players = game:GetService("Players")
     local UserInputService = game:GetService("UserInputService")
+    local RunService = game:GetService("RunService")
     local player = Players.LocalPlayer
 
-    local VERSION = 1
+    local VERSION = 2
     local TEXT = Color3.fromRGB(250, 228, 160)
     local MUTED = Color3.fromRGB(170, 165, 140)
     local BTN = Color3.fromRGB(48, 52, 64)
@@ -25,6 +26,9 @@ return function(parent, ctx)
         env.BananaHubClickTP = state
     end
     state.onChange = nil -- set by the UI below
+    if state.mode == nil then state.mode = "Velocity" end -- "Velocity" or "CFrame"
+    if state.speed == nil then state.speed = 200 end
+    local SPEEDS = { 100, 200, 350, 500 }
 
     local function setStatus(text)
         state.lastStatus = text
@@ -60,10 +64,50 @@ return function(parent, ctx)
         end
         -- Stand on top of the spot, keep facing the same way.
         local height = hum.HipHeight + hrp.Size.Y / 2 + 0.5
-        local _, yaw = hrp.CFrame:ToOrientation()
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        hrp.CFrame = CFrame.new(hit + Vector3.new(0, height, 0)) * CFrame.Angles(0, yaw, 0)
-        setStatus(string.format("Teleported to (%d, %d, %d)", hit.X, hit.Y, hit.Z))
+        local goal = hit + Vector3.new(0, height, 0)
+        if state.mode == "CFrame" then
+            local _, yaw = hrp.CFrame:ToOrientation()
+            hrp.AssemblyLinearVelocity = Vector3.zero
+            hrp.CFrame = CFrame.new(goal) * CFrame.Angles(0, yaw, 0)
+            setStatus(string.format("Teleported to (%d, %d, %d)", math.floor(hit.X), math.floor(hit.Y), math.floor(hit.Z)))
+            return
+        end
+
+        -- Velocity mode: push the character toward the spot every frame.
+        if state.moving then
+            state.moving.cancel = true -- a new press replaces the old trip
+        end
+        local trip = { cancel = false }
+        state.moving = trip
+        local speed = state.speed
+        local dist = (goal - hrp.Position).Magnitude
+        local timeLimit = dist / speed * 1.5 + 1
+        local started = os.clock()
+        setStatus(string.format("Flying %d studs at %d/s...", math.floor(dist), speed))
+        local conn
+        conn = RunService.Heartbeat:Connect(function()
+            local stop, msg = false, nil
+            if trip.cancel then
+                stop = true
+            elseif not hrp.Parent or hum.Health <= 0 then
+                stop, msg = true, "Stopped: character died or reset."
+            else
+                local offset = goal - hrp.Position
+                if offset.Magnitude < 3 then
+                    stop, msg = true, string.format("Arrived at (%d, %d, %d)", math.floor(hit.X), math.floor(hit.Y), math.floor(hit.Z))
+                elseif os.clock() - started > timeLimit then
+                    stop, msg = true, "Stopped: blocked by something (took too long)."
+                else
+                    hrp.AssemblyLinearVelocity = offset.Unit * math.min(speed, offset.Magnitude * 20)
+                end
+            end
+            if stop then
+                conn:Disconnect()
+                if hrp.Parent then hrp.AssemblyLinearVelocity = Vector3.zero end
+                if state.moving == trip then state.moving = nil end
+                if msg then setStatus(msg) end
+            end
+        end)
     end
 
     -- (Re)create the key listener once; replace it if this file was updated.
@@ -123,9 +167,11 @@ return function(parent, ctx)
 
     local toggleButton = makeButton("", 0, 0, 110)
     local keyButton = makeButton("", 118, 0, 130)
-    local help = makeLabel(36, 32, MUTED)
-    help.Text = "Point your mouse at a spot and press the key. Games with anti-teleport (like Steal An Egg) may pull you back or kill you."
-    local statusLabel = makeLabel(74, 32, TEXT)
+    local modeButton = makeButton("", 0, 34, 110)
+    local speedButton = makeButton("", 118, 34, 130)
+    local help = makeLabel(70, 32, MUTED)
+    help.Text = "Point your mouse at a spot and press the key. Velocity = fly there fast, CFrame = instant jump. Games with anti-teleport (like Steal An Egg) may still pull you back or kill you."
+    local statusLabel = makeLabel(108, 32, TEXT)
 
     local function render()
         toggleButton.Text = state.enabled and "Click TP: ON" or "Click TP: OFF"
@@ -135,6 +181,9 @@ return function(parent, ctx)
         else
             keyButton.Text = "Key: " .. state.key.Name
         end
+        modeButton.Text = "Mode: " .. state.mode
+        speedButton.Text = "Speed: " .. state.speed .. "/s"
+        speedButton.Visible = state.mode == "Velocity"
         statusLabel.Text = state.lastStatus or ""
     end
     state.onChange = render
@@ -143,6 +192,20 @@ return function(parent, ctx)
     conns[#conns + 1] = toggleButton.Activated:Connect(function()
         state.enabled = not state.enabled
         setStatus(state.enabled and ("On - press " .. state.key.Name .. " to teleport.") or "Off.")
+    end)
+
+    conns[#conns + 1] = modeButton.Activated:Connect(function()
+        state.mode = (state.mode == "Velocity") and "CFrame" or "Velocity"
+        setStatus("Mode: " .. state.mode .. ".")
+    end)
+
+    conns[#conns + 1] = speedButton.Activated:Connect(function()
+        local nextSpeed = SPEEDS[1]
+        for i, v in ipairs(SPEEDS) do
+            if v == state.speed then nextSpeed = SPEEDS[i % #SPEEDS + 1] end
+        end
+        state.speed = nextSpeed
+        setStatus("Speed: " .. state.speed .. " studs/s.")
     end)
 
     conns[#conns + 1] = keyButton.Activated:Connect(function()

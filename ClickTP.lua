@@ -9,7 +9,7 @@ return function(parent, ctx)
     local RunService = game:GetService("RunService")
     local player = Players.LocalPlayer
 
-    local VERSION = 2
+    local VERSION = 3
     local TEXT = Color3.fromRGB(250, 228, 160)
     local MUTED = Color3.fromRGB(170, 165, 140)
     local BTN = Color3.fromRGB(48, 52, 64)
@@ -29,6 +29,13 @@ return function(parent, ctx)
     if state.mode == nil then state.mode = "Velocity" end -- "Velocity" or "CFrame"
     if state.speed == nil then state.speed = 200 end
     local SPEEDS = { 100, 200, 350, 500 }
+    local MODES = { "Velocity", "CFrame", "Vehicle" }
+    local function cancelTrip()
+        local trip = state.moving
+        if not trip then return end
+        trip.cancel = true
+        if trip.cleanup then trip.cleanup() end
+    end
 
     local function setStatus(text)
         state.lastStatus = text
@@ -50,6 +57,7 @@ return function(parent, ctx)
     end
 
     local function teleportToMouse()
+        cancelTrip()
         local char = player.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -65,6 +73,56 @@ return function(parent, ctx)
         -- Stand on top of the spot, keep facing the same way.
         local height = hum.HipHeight + hrp.Size.Y / 2 + 0.5
         local goal = hit + Vector3.new(0, height, 0)
+        if state.mode == "Vehicle" then
+            local model = Instance.new("Model")
+            model.Name = "BananaHubTemporaryVehicle"
+            local seat = Instance.new("VehicleSeat")
+            seat.Size = Vector3.new(2, 1, 2)
+            seat.Transparency = 1
+            seat.CanCollide = false
+            seat.CFrame = hrp.CFrame * CFrame.new(0, -2, 0)
+            seat.Parent = model
+            model.PrimaryPart = seat
+            model.Parent = workspace
+            local trip = { cancel = false }
+            state.moving = trip
+            local seated = false
+            trip.cleanup = function()
+                if trip.cleaned then return end
+                trip.cleaned = true
+                trip.cancel = true
+                if seated and hum.Parent and hum.SeatPart == seat then hum.Sit = false end
+                model:Destroy()
+                if state.moving == trip then state.moving = nil end
+            end
+            setStatus("Trying temporary vehicle seat...")
+            task.spawn(function()
+                local ok, err = pcall(function()
+                    seat:Sit(hum)
+                    local started = os.clock()
+                    repeat
+                        RunService.Heartbeat:Wait()
+                        if trip.cancel or not hrp.Parent or hum.Health <= 0 then return end
+                    until hum.SeatPart == seat or os.clock() - started > 1
+                    if hum.SeatPart ~= seat then
+                        setStatus("Vehicle mode: character could not sit in the local seat.")
+                        return
+                    end
+                    seated = true
+                    local delta = goal - hrp.Position
+                    model:PivotTo(model:GetPivot() + delta)
+                    seat.AssemblyLinearVelocity = Vector3.zero
+                    seat.AssemblyAngularVelocity = Vector3.zero
+                    RunService.Heartbeat:Wait()
+                    if not trip.cancel then
+                        setStatus("Local vehicle moved. Server acceptance is not guaranteed.")
+                    end
+                end)
+                trip.cleanup()
+                if not ok then setStatus("Vehicle mode failed: " .. tostring(err)) end
+            end)
+            return
+        end
         if state.mode == "CFrame" then
             local _, yaw = hrp.CFrame:ToOrientation()
             hrp.AssemblyLinearVelocity = Vector3.zero
@@ -112,6 +170,7 @@ return function(parent, ctx)
 
     -- (Re)create the key listener once; replace it if this file was updated.
     if state.conn and state.version ~= VERSION then
+        cancelTrip()
         pcall(function() state.conn:Disconnect() end)
         state.conn = nil
     end
@@ -170,7 +229,7 @@ return function(parent, ctx)
     local modeButton = makeButton("", 0, 34, 110)
     local speedButton = makeButton("", 118, 34, 130)
     local help = makeLabel(70, 32, MUTED)
-    help.Text = "Point your mouse at a spot and press the key. Velocity = fly there fast, CFrame = instant jump. Games with anti-teleport (like Steal An Egg) may still pull you back or kill you."
+    help.Text = "Point and press the key. Vehicle tries a temporary local seat. All modes are client-side; server checks may reject movement."
     local statusLabel = makeLabel(108, 32, TEXT)
 
     local function render()
@@ -191,11 +250,14 @@ return function(parent, ctx)
     local conns = {}
     conns[#conns + 1] = toggleButton.Activated:Connect(function()
         state.enabled = not state.enabled
+        if not state.enabled then cancelTrip() end
         setStatus(state.enabled and ("On - press " .. state.key.Name .. " to teleport.") or "Off.")
     end)
 
     conns[#conns + 1] = modeButton.Activated:Connect(function()
-        state.mode = (state.mode == "Velocity") and "CFrame" or "Velocity"
+        cancelTrip()
+        local index = table.find(MODES, state.mode) or 0
+        state.mode = MODES[index % #MODES + 1]
         setStatus("Mode: " .. state.mode .. ".")
     end)
 

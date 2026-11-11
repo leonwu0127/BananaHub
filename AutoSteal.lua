@@ -1258,20 +1258,41 @@ return function(parent, ctx)
     local lastStealLog = {}
     local function fmtV(v) return v and string.format("(%.0f, %.0f, %.0f)", v.X, v.Y, v.Z) or "nil" end
 
-    -- go to a spot: instant teleport, and if the server pulls us back, glide there instead
+    -- Recompute each hop from the observed position; never issue a >100 stud TP.
     local function goTo(hrp, target, log)
-        hrp.CFrame = CFrame.new(target)
-        pcall(function() hrp.AssemblyLinearVelocity = Vector3.zero end)
-        task.wait(0.6)
-        local off = (hrp.Position - target).Magnitude
-        log[#log + 1] = "TP to " .. fmtV(target) .. " -> 0.6s later " .. string.format("%.1f", off) .. " studs away"
-        if off < 8 then return true end
-        log[#log + 1] = "  pulled back by server (anti-teleport). Gliding there at 45 studs/s instead"
-        glide(hrp, target, 45)
-        task.wait(0.6)
-        off = (hrp.Position - target).Magnitude
-        log[#log + 1] = "  after glide: " .. string.format("%.1f", off) .. " studs away"
-        return off < 8
+        local deadline = os.clock() + 120
+        local stalled = 0
+        while alive and hrp.Parent and os.clock() < deadline do
+            local hum = hrp.Parent:FindFirstChildOfClass("Humanoid")
+            if not hum or hum.Health <= 0 or player.Character ~= hrp.Parent then return false end
+            local delta = target - hrp.Position
+            local distance = delta.Magnitude
+            if distance < 3 then return true end
+            local step = delta.Unit * math.min(100, distance)
+            local gravity = workspace.Gravity
+            local ok, err = pcall(function()
+                workspace.Gravity = 100000
+                hrp.CFrame = hrp.CFrame + step
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+                task.wait(0.1)
+            end)
+            workspace.Gravity = gravity
+            if not ok then
+                log[#log + 1] = "Hop failed: " .. tostring(err)
+                return false
+            end
+            task.wait(0.5)
+            if not alive or not hrp.Parent then return false end
+            local remaining = (target - hrp.Position).Magnitude
+            log[#log + 1] = string.format("Hop %.1f studs; %.1f remaining", step.Magnitude, remaining)
+            stalled = remaining >= distance - 1 and stalled + 1 or 0
+            if stalled >= 3 then
+                log[#log + 1] = "Stopped: three hops made no progress"
+                return false
+            end
+        end
+        return false
     end
 
     local function describePrompt(pp)
@@ -1485,20 +1506,18 @@ return function(parent, ctx)
                 status.Text = "Got it! Walking back..."
                 walkBack(hum2, h2, before, log)
             elseif mode == "TP" then
-                status.Text = "Got it! Teleporting back..."
+                status.Text = "Got it! Split teleporting back..."
                 stage = "tp-back"
                 local tgt = before + Vector3.new(0, 3, 0)
-                h2.CFrame = CFrame.new(tgt, Vector3.new(home.X, tgt.Y, home.Z))
-                pcall(function() h2.AssemblyLinearVelocity = Vector3.zero end)
-                task.wait(0.6)
-                local off = (h2.Position - tgt).Magnitude
-                log[#log + 1] = string.format("  TP back -> 0.6s later %.1f studs away", off)
+                local reached = goTo(h2, tgt, log)
                 local still = carrying(egg, player.Character, pos)
                 log[#log + 1] = "  still carrying after TP: " .. tostring(still)
                 stage = "return"
-                if off > 8 and hum2.Health > 0 then
-                    log[#log + 1] = "  pulled back, tweening instead"
-                    tweenTo(h2, tgt, TWEEN_SPEED, log)
+                if not reached then
+                    for _, cn in ipairs(deathConns) do cn:Disconnect() end
+                    status.Text = "Split TP stopped - see log"
+                    got = false
+                    return
                 end
             elseif mode == "Tween" then
                 status.Text = "Got it! Tweening back..."
